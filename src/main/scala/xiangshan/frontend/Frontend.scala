@@ -1,108 +1,95 @@
-/***************************************************************************************
-* Copyright (c) 2020-2021 Institute of Computing Technology, Chinese Academy of Sciences
-* Copyright (c) 2020-2021 Peng Cheng Laboratory
-*
-* XiangShan is licensed under Mulan PSL v2.
-* You can use this software according to the terms and conditions of the Mulan PSL v2.
-* You may obtain a copy of Mulan PSL v2 at:
-*          http://license.coscl.org.cn/MulanPSL2
-*
-* THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND,
-* EITHER EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT,
-* MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
-*
-* See the Mulan PSL v2 for more details.
-*
-*
-* Acknowledgement
-*
-* This implementation is inspired by several key papers:
-* [1] Alex Ramirez, Oliverio J. Santana, Josep L. Larriba-Pey, and Mateo Valero. "[Fetching instruction streams.]
-* (https://doi.org/10.1109/MICRO.2002.1176264)" 35th Annual IEEE/ACM International Symposium on Microarchitecture
-* (MICRO). 2002.
-* [2] Yasuo Ishii, Jaekyu Lee, Krishnendra Nathella, and Dam Sunwoo. "[Rebasing instruction prefetching: An industry
-* perspective.](https://doi.org/10.1109/LCA.2020.3035068)" IEEE Computer Architecture Letters 19.2: 147-150. 2020.
-* [3] Yasuo Ishii, Jaekyu Lee, Krishnendra Nathella, and Dam Sunwoo. "[Re-establishing fetch-directed instruction
-* prefetching: An industry perspective.](https://doi.org/10.1109/ISPASS51385.2021.00034)" 2021 IEEE International
-* Symposium on Performance Analysis of Systems and Software (ISPASS). 2021.
-***************************************************************************************/
+// Copyright (c) 2024-2025 Beijing Institute of Open Source Chip (BOSC)
+// Copyright (c) 2020-2025 Institute of Computing Technology, Chinese Academy of Sciences
+// Copyright (c) 2020-2021 Peng Cheng Laboratory
+//
+// XiangShan is licensed under Mulan PSL v2.
+// You can use this software according to the terms and conditions of the Mulan PSL v2.
+// You may obtain a copy of Mulan PSL v2 at:
+//          https://license.coscl.org.cn/MulanPSL2
+//
+// THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND,
+// EITHER EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT,
+// MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
+//
+// See the Mulan PSL v2 for more details.
+
+// Acknowledgement
+//
+// This implementation is inspired by several key papers:
+// [1] Alex Ramirez, Oliverio J. Santana, Josep L. Larriba-Pey, and Mateo Valero. "[Fetching instruction streams.]
+// (https://doi.org/10.1109/MICRO.2002.1176264)" 35th Annual IEEE/ACM International Symposium on Microarchitecture
+// (MICRO). 2002.
+// [2] Yasuo Ishii, Jaekyu Lee, Krishnendra Nathella, and Dam Sunwoo. "[Rebasing instruction prefetching: An industry
+// perspective.](https://doi.org/10.1109/LCA.2020.3035068)" IEEE Computer Architecture Letters 19.2: 147-150. 2020.
+// [3] Yasuo Ishii, Jaekyu Lee, Krishnendra Nathella, and Dam Sunwoo. "[Re-establishing fetch-directed instruction
+// prefetching: An industry perspective.](https://doi.org/10.1109/ISPASS51385.2021.00034)" 2021 IEEE International
+// Symposium on Performance Analysis of Systems and Software (ISPASS). 2021.
 
 package xiangshan.frontend
 import chisel3._
-import chisel3.util._
 import freechips.rocketchip.diplomacy.LazyModule
 import freechips.rocketchip.diplomacy.LazyModuleImp
-import ftq.Ftq
-import ftq.FtqPtr
 import org.chipsalliance.cde.config.Parameters
-import utility._
+import utility.ClockGate
+import utility.DelayN
+import utility.HasPerfEvents
+import utility.HPerfMonitor
+import utility.ModuleNode
+import utility.PerfEvent
+import utility.ResetGen
+import utility.ResetGenNode
+import utility.XSError
 import utility.mbist.MbistInterface
 import utility.mbist.MbistPipeline
-import utility.sram.SramBroadcastBundle
 import utility.sram.SramHelper
-import xiangshan._
+import xiangshan.DebugOptionsKey
 import xiangshan.backend.fu.NewCSR.PFEvent
 import xiangshan.backend.fu.PMP
 import xiangshan.backend.fu.PMPChecker
-import xiangshan.backend.fu.PMPReqBundle
-import xiangshan.cache.mmu._
+import xiangshan.cache.mmu.PTWFilter
+import xiangshan.cache.mmu.PTWRepeaterNB
+import xiangshan.cache.mmu.TLB
+import xiangshan.cache.mmu.VectorTlbPtwIO
 import xiangshan.frontend.bpu.Bpu
+import xiangshan.frontend.ftq.Ftq
+import xiangshan.frontend.ftq.FtqPtr
 import xiangshan.frontend.ibuffer.IBuffer
-import xiangshan.frontend.icache._
-import xiangshan.frontend.ifu._
+import xiangshan.frontend.icache.ICache
+import xiangshan.frontend.ifu.Ifu
 import xiangshan.frontend.instruncache.InstrUncache
 import xiangshan.frontend.simfrontend.SimFrontendInlinedImp
 
-class Frontend()(implicit p: Parameters) extends LazyModule with HasXSParameter {
+class Frontend()(implicit p: Parameters) extends LazyModule with HasFrontendParameters {
   override def shouldBeInlined: Boolean = false
-  val inner       = LazyModule(new FrontendInlined)
-  lazy val module = new FrontendImp(this)
+
+  val inner:       FrontendInlined = LazyModule(new FrontendInlined)
+  lazy val module: FrontendImp     = new FrontendImp(this)
 }
 
 class FrontendImp(wrapper: Frontend)(implicit p: Parameters) extends LazyModuleImp(wrapper) {
-  val io      = IO(wrapper.inner.module.io.cloneType)
-  val io_perf = IO(wrapper.inner.module.io_perf.cloneType)
+  val io:      FrontendIO     = IO(wrapper.inner.module.io.cloneType)
+  val io_perf: Vec[PerfEvent] = IO(wrapper.inner.module.io_perf.cloneType)
+
   io <> wrapper.inner.module.io
   io_perf <> wrapper.inner.module.io_perf
+
   if (p(DebugOptionsKey).ResetGen) {
     ResetGen(ResetGenNode(Seq(ModuleNode(wrapper.inner.module))), reset, sim = false, io.dft_reset)
   }
 }
 
-abstract class FrontendInlinedImpBase(outer: FrontendInlined) extends LazyModuleImp(outer) with HasXSParameter
+abstract class FrontendInlinedImpBase(outer: FrontendInlined) extends LazyModuleImp(outer)
+    with HasFrontendParameters
     with HasPerfEvents {
-  val io = IO(new Bundle() {
-    val hartId       = Input(UInt(hartIdLen.W))
-    val reset_vector = Input(PrunedAddr(PAddrBits))
-    val fencei       = Input(Bool())
-    val ptw          = new TlbPtwIO()
-    val backend      = new FrontendToCtrlIO
-    val softPrefetch = Vec(backendParams.LduCnt, Flipped(Valid(new SoftIfetchPrefetchBundle)))
-    val sfence       = Input(new SfenceBundle)
-    val tlbCsr       = Input(new TlbCsrBundle)
-    val csrCtrl      = Input(new CustomCSRCtrlIO)
-    val error        = ValidIO(new L1CacheErrorInfo)
-    val frontendInfo = new Bundle {
-      val ibufFull = Output(Bool())
-      val bpuInfo = new Bundle {
-        val bpRight = Output(UInt(XLEN.W))
-        val bpWrong = Output(UInt(XLEN.W))
-      }
-    }
-    val resetInFrontend = Output(Bool())
-    val debugTopDown = new Bundle {
-      val robHeadVaddr = Flipped(Valid(PrunedAddr(VAddrBits)))
-    }
-    val dft       = Option.when(hasDFT)(Input(new SramBroadcastBundle))
-    val dft_reset = Option.when(hasMbist)(Input(new DFTResetSignals()))
-  })
+
+  val io: FrontendIO = IO(new FrontendIO)
 }
 
-class FrontendInlined()(implicit p: Parameters) extends LazyModule with HasXSParameter {
+class FrontendInlined()(implicit p: Parameters) extends LazyModule with HasFrontendParameters {
   override def shouldBeInlined: Boolean = true
 
-  val instrUncache = LazyModule(new InstrUncache())
-  val icache       = LazyModule(new ICache())
+  val instrUncache: InstrUncache = LazyModule(new InstrUncache)
+  val icache:       ICache       = LazyModule(new ICache)
 
   lazy val module: FrontendInlinedImpBase =
     if (env.EnableSimFrontend) new SimFrontendInlinedImp(this) else new FrontendInlinedImp(this)
@@ -110,27 +97,29 @@ class FrontendInlined()(implicit p: Parameters) extends LazyModule with HasXSPar
 
 class FrontendInlinedImp(outer: FrontendInlined) extends FrontendInlinedImpBase(outer) {
 
-  // decouped-frontend modules
-  val instrUncache = outer.instrUncache.module
-  val icache       = outer.icache.module
-  val bpu          = Module(new Bpu)
-  val ifu          = Module(new Ifu)
-  val ibuffer      = Module(new IBuffer)
-  val ftq          = Module(new Ftq)
+  // decoupled-frontend modules
+  private val instrUncache = outer.instrUncache.module
+  private val icache       = outer.icache.module
+  private val bpu          = Module(new Bpu)
+  private val ifu          = Module(new Ifu)
+  private val ibuffer      = Module(new IBuffer)
+  private val ftq          = Module(new Ftq)
 
-  val needFlush            = RegNext(io.backend.toFtq.redirect.valid)
-  val FlushControlRedirect = RegNext(io.backend.toFtq.redirect.bits.debugIsCtrl)
-  val FlushMemVioRedirect  = RegNext(io.backend.toFtq.redirect.bits.debugIsMemVio)
-  val FlushControlBTBMiss  = Wire(Bool())
-  val FlushTAGEMiss        = Wire(Bool())
-  val FlushSCMiss          = Wire(Bool())
-  val FlushITTAGEMiss      = Wire(Bool())
-  val FlushRASMiss         = Wire(Bool())
+  private val needFlush = RegNext(io.backend.toFtq.redirect.valid)
+
+  // FIXME: top-down related signals, should be redesigned
+  private val FlushControlRedirect = RegNext(io.backend.toFtq.redirect.bits.debugIsCtrl)
+  private val FlushMemVioRedirect  = RegNext(io.backend.toFtq.redirect.bits.debugIsMemVio)
+  private val FlushControlBTBMiss  = Wire(Bool())
+  private val FlushTAGEMiss        = Wire(Bool())
+  private val FlushSCMiss          = Wire(Bool())
+  private val FlushITTAGEMiss      = Wire(Bool())
+  private val FlushRASMiss         = Wire(Bool())
 
   // TODO: what the fuck are these magic numbers?
-  val tlbCsr  = DelayN(io.tlbCsr, 1)
-  val csrCtrl = DelayN(io.csrCtrl, 2)
-  val sfence  = DelayN(io.sfence, 2)
+  private val tlbCsr  = DelayN(io.tlbCsr, 1)
+  private val csrCtrl = DelayN(io.csrCtrl, 2)
+  private val sfence  = DelayN(io.sfence, 2)
 
   // trigger
   ifu.io.frontendTrigger := csrCtrl.frontend_trigger
@@ -140,39 +129,45 @@ class FrontendInlinedImp(outer: FrontendInlined) extends FrontendInlinedImpBase(
 
   // bpu ctrl
   bpu.io.ctrl        := csrCtrl.bp_ctrl
-  bpu.io.resetVector := io.reset_vector
+  bpu.io.resetVector := io.resetVector
 
   // pmp
-  val pmp       = Module(new PMP())
-  val pmp_check = VecInit(Seq.fill(coreParams.ipmpPortNum)(Module(new PMPChecker(3, sameCycle = true)).io))
+  private val pmp = Module(new PMP)
   pmp.io.distribute_csr := csrCtrl.distribute_csr
-  val pmp_req_vec = Wire(Vec(coreParams.ipmpPortNum, Valid(new PMPReqBundle())))
-  (0 until 2).foreach(i => pmp_req_vec(i) <> icache.io.pmp(i).req) // magic number 2: prefetchPipe & mainPipe
-  pmp_req_vec.last <> ifu.io.pmp.req
 
-  for (i <- pmp_check.indices) {
+  private val pmpChecker = VecInit(Seq.fill(coreParams.ipmpPortNum)(Module(new PMPChecker(sameCycle = true)).io))
+
+  private val pmpRequestor = VecInit(icache.io.pmp :+ ifu.io.pmp)
+  require(pmpRequestor.length == coreParams.ipmpPortNum)
+
+  (pmpChecker zip pmpRequestor).foreach { case (checker, requestor) =>
     if (HasBitmapCheck) {
-      pmp_check(i).apply(tlbCsr.mbmc.CMODE.asBool, tlbCsr.priv.imode, pmp.io.pmp, pmp.io.pma, pmp_req_vec(i))
+      checker.apply(tlbCsr.mbmc.CMODE.asBool, tlbCsr.priv.imode, pmp.io.pmp, pmp.io.pma, requestor.req)
     } else {
-      pmp_check(i).apply(tlbCsr.priv.imode, pmp.io.pmp, pmp.io.pma, pmp_req_vec(i))
+      checker.apply(tlbCsr.priv.imode, pmp.io.pmp, pmp.io.pma, requestor.req)
     }
+    requestor.resp := checker.resp
   }
-  (0 until 2).foreach(i => icache.io.pmp(i).resp <> pmp_check(i).resp)
-  ifu.io.pmp.resp <> pmp_check.last.resp
 
   // icache use a non-block tlb port, ifu use a block tlb port
-  val itlb = Module(new TLB(coreParams.itlbPortNum, nRespDups = 1, Seq(false, true), itlbParams))
-  itlb.io.requestor.head <> icache.io.itlb
-  itlb.io.requestor.last <> ifu.io.itlb // mmio may need re-tlb, blocked
+  private val itlb = Module(new TLB(coreParams.itlbPortNum, nRespDups = 1, Seq(false, true), itlbParams))
   itlb.io.hartId := io.hartId
-  itlb.io.base_connect(sfence, tlbCsr)
   itlb.io.flushPipe.foreach(_ := icache.io.itlbFlushPipe)
   itlb.io.redirect := DontCare // itlb has flushpipe, don't need redirect signal
+  itlb.io.base_connect(sfence, tlbCsr)
 
-  val itlb_ptw = Wire(new VectorTlbPtwIO(coreParams.itlbPortNum))
-  itlb_ptw.connect(itlb.io.ptw)
-  val itlbRepeater1 = PTWFilter(itlbParams.fenceDelay, itlb_ptw, sfence, tlbCsr, l2tlbParams.ifilterSize)
-  val itlbRepeater2 =
+  private val itlbRequestor = VecInit(Seq(icache.io.itlb, ifu.io.itlb))
+  require(itlbRequestor.length == coreParams.itlbPortNum)
+
+  (itlb.io.requestor zip itlbRequestor).foreach { case (port, requestor) =>
+    port <> requestor
+  }
+
+  private val ptw = Wire(new VectorTlbPtwIO(coreParams.itlbPortNum))
+  ptw.connect(itlb.io.ptw)
+  private val itlbRepeater1 =
+    PTWFilter(itlbParams.fenceDelay, ptw, sfence, tlbCsr, l2tlbParams.ifilterSize)
+  private val itlbRepeater2 =
     PTWRepeaterNB(passReady = false, itlbParams.fenceDelay, itlbRepeater1.io.ptw, io.ptw, sfence, tlbCsr)
 
   // ICache-Memblock
@@ -216,13 +211,13 @@ class FrontendInlinedImp(outer: FrontendInlined) extends FrontendInlinedImpBase(
   io.backend.fromIfu := ifu.io.toBackend
   io.frontendInfo.bpuInfo <> ftq.io.bpuInfo
 
-  val checkPcMem = Reg(Vec(FtqSize, new PrunedAddr(VAddrBits)))
+  private val checkPcMem = Reg(Vec(FtqSize, new PrunedAddr(VAddrBits)))
   when(ftq.io.toBackend.pc_mem_wen) {
     checkPcMem(ftq.io.toBackend.pc_mem_waddr) := ftq.io.toBackend.pc_mem_wdata
   }
 
-  val checkTargetPtr = Wire(Vec(DecodeWidth, new FtqPtr))
-  val checkTarget    = Wire(Vec(DecodeWidth, PrunedAddr(VAddrBits)))
+  private val checkTargetPtr = Wire(Vec(DecodeWidth, new FtqPtr))
+  private val checkTarget    = Wire(Vec(DecodeWidth, PrunedAddr(VAddrBits)))
 
   for (i <- 0 until DecodeWidth) {
     checkTargetPtr(i) := ibuffer.io.out(i).bits.ftqPtr
@@ -399,15 +394,15 @@ class FrontendInlinedImp(outer: FrontendInlined) extends FrontendInlinedImpBase(
   io.resetInFrontend       := reset.asBool
 
   // PFEvent
-  val pfevent = Module(new PFEvent)
+  private val pfevent = Module(new PFEvent)
   pfevent.io.distribute_csr := io.csrCtrl.distribute_csr
-  val csrevents = pfevent.io.hpmevent.take(8)
+  private val csrevents = pfevent.io.hpmevent.take(8)
 
-  val perfFromUnits = Seq(ifu, ibuffer, icache, ftq).flatMap(_.getPerfEvents)
-  val perfFromIO    = Seq()
-  val perfBlock     = Seq()
+  private val perfFromUnits = Seq(ifu, ibuffer, icache, ftq).flatMap(_.getPerfEvents)
+  private val perfFromIO    = Seq()
+  private val perfBlock     = Seq()
   // let index = 0 be no event
-  val allPerfEvents = Seq(("noEvent", 0.U)) ++ perfFromUnits ++ perfFromIO ++ perfBlock
+  private val allPerfEvents = Seq(("noEvent", 0.U)) ++ perfFromUnits ++ perfFromIO ++ perfBlock
 
   if (printEventCoding) {
     for (((name, inc), i) <- allPerfEvents.zipWithIndex) {
@@ -415,8 +410,8 @@ class FrontendInlinedImp(outer: FrontendInlined) extends FrontendInlinedImpBase(
     }
   }
 
-  val allPerfInc          = allPerfEvents.map(_._2.asTypeOf(new PerfEvent))
-  override val perfEvents = HPerfMonitor(csrevents, allPerfInc).getPerfEvents
+  private val allPerfInc = allPerfEvents.map(_._2.asTypeOf(new PerfEvent))
+  override val perfEvents: Seq[(String, UInt)] = HPerfMonitor(csrevents, allPerfInc).getPerfEvents
   generatePerfEvent()
 
   private val mbistPl = MbistPipeline.PlaceMbistPipeline(Int.MaxValue, "MbistPipeFrontend", hasMbist)
@@ -447,7 +442,7 @@ class FrontendInlinedImp(outer: FrontendInlined) extends FrontendInlinedImpBase(
     cg.cgen := false.B
   }
 
-  sigFromSrams.foreach { case sig => sig := DontCare }
+  sigFromSrams.foreach(_ := DontCare)
   sigFromSrams.zip(io.dft).foreach {
     case (sig, dft) =>
       if (hasMbist) {

@@ -189,6 +189,11 @@ class BpuMeta(implicit p: Parameters) extends BpuBundle {
   val perf_s3Prediction: Prediction = new Prediction
 }
 
+class BpuPerfInfo(implicit p: Parameters) extends BpuBundle {
+  val bpRight: UInt = Output(UInt(XLEN.W))
+  val bpWrong: UInt = Output(UInt(XLEN.W))
+}
+
 /* *** internal const & type *** */
 // TargetCarry is an attribute of partial target
 // While lower part of target is recorded in predictor structure,

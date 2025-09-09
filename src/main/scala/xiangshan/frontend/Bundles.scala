@@ -20,17 +20,26 @@ import chisel3.util._
 import ftq.BpuFlushInfo
 import ftq.FtqPtr
 import org.chipsalliance.cde.config.Parameters
+import utility.DFTResetSignals
+import utility.sram.SramBroadcastBundle
 import utils.EnumUInt
+import xiangshan.CustomCSRCtrlIO
+import xiangshan.FrontendToCtrlIO
 import xiangshan.InstSeqNum
+import xiangshan.L1CacheErrorInfo
 import xiangshan.Redirect
-import xiangshan.RedirectLevel
+import xiangshan.SfenceBundle
+import xiangshan.SoftIfetchPrefetchBundle
+import xiangshan.TlbCsrBundle
 import xiangshan.TopDownCounters
 import xiangshan.TriggerAction
 import xiangshan.backend.GPAMemEntry
 import xiangshan.backend.fu.PMPRespBundle
+import xiangshan.cache.mmu.TlbPtwIO
 import xiangshan.cache.mmu.TlbResp
 import xiangshan.frontend.bpu.BpuCommit
 import xiangshan.frontend.bpu.BpuMeta
+import xiangshan.frontend.bpu.BpuPerfInfo
 import xiangshan.frontend.bpu.BpuPrediction
 import xiangshan.frontend.bpu.BpuRedirect
 import xiangshan.frontend.bpu.BpuSpeculationMeta
@@ -43,6 +52,40 @@ import xiangshan.frontend.icache.ICacheRespBundle
 import xiangshan.frontend.icache.ICacheTopdownInfo
 import xiangshan.frontend.instruncache.InstrUncacheReq
 import xiangshan.frontend.instruncache.InstrUncacheResp
+
+class FrontendPerfInfo(implicit p: Parameters) extends FrontendBundle {
+  val ibufFull: Bool        = Bool()
+  val bpuInfo:  BpuPerfInfo = new BpuPerfInfo
+}
+
+class FrontendDebugTopDownBundle(implicit p: Parameters) extends FrontendBundle {
+  val robHeadVaddr: Valid[PrunedAddr] = Valid(PrunedAddr(VAddrBits))
+}
+
+class FrontendIO(implicit p: Parameters) extends FrontendBundle {
+  val hartId:      UInt             = Input(UInt(hartIdLen.W))
+  val resetVector: PrunedAddr       = Input(PrunedAddr(PAddrBits))
+  val fencei:      Bool             = Input(Bool())
+  val ptw:         TlbPtwIO         = new TlbPtwIO()
+  val backend:     FrontendToCtrlIO = new FrontendToCtrlIO
+  val softPrefetch: Vec[Valid[SoftIfetchPrefetchBundle]] =
+    Vec(backendParams.LduCnt, Flipped(Valid(new SoftIfetchPrefetchBundle)))
+  val sfence:          SfenceBundle            = Input(new SfenceBundle)
+  val tlbCsr:          TlbCsrBundle            = Input(new TlbCsrBundle)
+  val csrCtrl:         CustomCSRCtrlIO         = Input(new CustomCSRCtrlIO)
+  val error:           Valid[L1CacheErrorInfo] = Valid(new L1CacheErrorInfo)
+  val resetInFrontend: Bool                    = Output(Bool())
+
+  // perf
+  val frontendInfo: FrontendPerfInfo = Output(new FrontendPerfInfo)
+
+  // debug
+  val debugTopDown: FrontendDebugTopDownBundle = Flipped(new FrontendDebugTopDownBundle)
+
+  // dft
+  val dft:       Option[SramBroadcastBundle] = Option.when(hasDFT)(Input(new SramBroadcastBundle))
+  val dft_reset: Option[DFTResetSignals]     = Option.when(hasMbist)(Input(new DFTResetSignals))
+}
 
 class FrontendTopDownBundle(implicit p: Parameters) extends FrontendBundle {
   val reasons:    Vec[Bool] = Vec(TopDownCounters.NumStallReasons.id, Bool())
@@ -275,12 +318,6 @@ class PreDecodeInfo extends Bundle { // 8 bit
   def isJal:  Bool = brType === BrType.Jal
   def isJalr: Bool = brType === BrType.Jalr
   def notCFI: Bool = brType === BrType.NotCfi
-}
-
-// pc = ftq.startAddr + Cat(offset, 0.U(1.W)) - Cat(borrow, 0.U(1.W))
-class FtqPcOffset(implicit p: Parameters) extends FrontendBundle {
-  val borrow: Bool = Bool()
-  val offset: UInt = UInt(FetchBlockInstOffsetWidth.W)
 }
 
 class InstrEndOffset(implicit p: Parameters) extends FrontendBundle {

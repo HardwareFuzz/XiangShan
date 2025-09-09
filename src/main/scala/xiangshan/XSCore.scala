@@ -128,7 +128,7 @@ class XSCoreImp(outer: XSCoreBase) extends LazyModuleImp(outer)
   val memBlock = outer.memBlock.module
 
   frontend.io.hartId := memBlock.io.inner_hartId
-  frontend.io.reset_vector := memBlock.io.inner_reset_vector
+  frontend.io.resetVector := memBlock.io.inner_reset_vector
   frontend.io.softPrefetch <> memBlock.io.ifetchPrefetch
   frontend.io.backend <> backend.io.frontend
   frontend.io.sfence <> backend.io.frontendSfence
