@@ -45,6 +45,7 @@ import coupledL2.tl2chi._
 import xiangshan.backend.datapath.WakeUpConfig
 import xiangshan.frontend.ftq.FtqParameters
 import xiangshan.mem.prefetch.{PrefetcherParams, SMSParams, StreamStrideParams, TLBPlace}
+import utility.Constantin
 
 import scala.math.{max, min, pow}
 
