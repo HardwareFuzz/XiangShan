@@ -31,7 +31,7 @@ import xiangshan._
 import xiangshan.backend.Bundles.DynInst
 import xiangshan.backend.rob.{RobDebugRollingIO, RobPtr}
 import xiangshan.cache.wpu._
-import xiangshan.mem.{AddPipelineReg, DataBufferEntry, HasL1PrefetchSourceParameter, LqPtr}
+import xiangshan.mem.{AddPipelineReg, DataBufferEntry, HasL1PrefetchSourceParameter, HasMemBlockParameters, LqPtr}
 import xiangshan.mem.prefetch._
 
 // DCache specific parameters
@@ -87,7 +87,10 @@ case class DCacheParameters
 
 // Default DCache size = 64 sets * 8 ways * 8 banks * 8 Byte = 32K Byte
 
-trait HasDCacheParameters extends HasL1CacheParameters with HasL1PrefetchSourceParameter{
+trait HasDCacheParameters
+  extends HasMemBlockParameters
+  with HasL1PrefetchSourceParameter
+  with HasL1CacheParameters {
   val cacheParams = dcacheParameters
   val cfg = cacheParams
 
@@ -261,70 +264,6 @@ trait HasDCacheParameters extends HasL1CacheParameters with HasL1PrefetchSourceP
 
   def get_direct_map_way(addr:UInt): UInt = {
     addr(DCacheAboveIndexOffset + log2Up(DCacheWays) - 1, DCacheAboveIndexOffset)
-  }
-
-  def arbiter[T <: Bundle](
-    in: Seq[DecoupledIO[T]],
-    out: DecoupledIO[T],
-    name: Option[String] = None): Unit = {
-    val arb = Module(new Arbiter[T](chiselTypeOf(out.bits), in.size))
-    if (name.nonEmpty) { arb.suggestName(s"${name.get}_arb") }
-    for ((a, req) <- arb.io.in.zip(in)) {
-      a <> req
-    }
-    out <> arb.io.out
-  }
-
-  def arbiter_with_pipereg[T <: Bundle](
-    in: Seq[DecoupledIO[T]],
-    out: DecoupledIO[T],
-    name: Option[String] = None): Unit = {
-    val arb = Module(new Arbiter[T](chiselTypeOf(out.bits), in.size))
-    if (name.nonEmpty) { arb.suggestName(s"${name.get}_arb") }
-    for ((a, req) <- arb.io.in.zip(in)) {
-      a <> req
-    }
-    AddPipelineReg(arb.io.out, out, false.B)
-  }
-
-  def arbiter_with_pipereg_N_dup[T <: Bundle](
-    in: Seq[DecoupledIO[T]],
-    out: DecoupledIO[T],
-    dups: Seq[DecoupledIO[T]],
-    name: Option[String] = None): Unit = {
-    val arb = Module(new Arbiter[T](chiselTypeOf(out.bits), in.size))
-    if (name.nonEmpty) { arb.suggestName(s"${name.get}_arb") }
-    for ((a, req) <- arb.io.in.zip(in)) {
-      a <> req
-    }
-    for (dup <- dups) {
-      AddPipelineReg(arb.io.out, dup, false.B)
-    }
-    AddPipelineReg(arb.io.out, out, false.B)
-  }
-
-  def rrArbiter[T <: Bundle](
-    in: Seq[DecoupledIO[T]],
-    out: DecoupledIO[T],
-    name: Option[String] = None): Unit = {
-    val arb = Module(new RRArbiter[T](chiselTypeOf(out.bits), in.size))
-    if (name.nonEmpty) { arb.suggestName(s"${name.get}_arb") }
-    for ((a, req) <- arb.io.in.zip(in)) {
-      a <> req
-    }
-    out <> arb.io.out
-  }
-
-  def fastArbiter[T <: Bundle](
-    in: Seq[DecoupledIO[T]],
-    out: DecoupledIO[T],
-    name: Option[String] = None): Unit = {
-    val arb = Module(new FastArbiter[T](chiselTypeOf(out.bits), in.size))
-    if (name.nonEmpty) { arb.suggestName(s"${name.get}_arb") }
-    for ((a, req) <- arb.io.in.zip(in)) {
-      a <> req
-    }
-    out <> arb.io.out
   }
 
   val numReplaceRespPorts = 2
