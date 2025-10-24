@@ -64,6 +64,8 @@ class MainBtb(implicit p: Parameters) extends BasePredictor with HasMainBtbParam
   }
   io.resetDone := resetDone
 
+  io.train.ready := true.B
+
   private val replacer = Module(new MainBtbReplacer)
 
   sramBanks.map(_.map(_.map { m =>
@@ -221,7 +223,7 @@ class MainBtb(implicit p: Parameters) extends BasePredictor with HasMainBtbParam
   io.meta.attributes         := s2_rawBtbEntries.map(_.attribute)
 
   /* training stage 0 */
-  private val t0_valid = io.train.valid && io.enable
+  private val t0_valid = io.train.fire && io.enable
   private val t0_train = io.train.bits
 
   /* training stage 1 */
