@@ -586,7 +586,7 @@ class CtrlBlockImp(
     rename.io.fusionInfo(i) := fusionDecoder.io.info(i)
 
     // update the first RenameWidth - 1 instructions
-    decode.io.fusion(i) := fusionDecoder.io.out(i).valid && rename.io.out(i).fire
+    decode.io.fusion(i) := !disableFusion && fusionDecoder.io.out(i).valid && rename.io.out(i).fire
     // TODO: remove this dirty code for ftq update
     val sameFtqPtr = rename.io.in(i).bits.ftqPtr.value === rename.io.in(i + 1).bits.ftqPtr.value
     val ftqOffset0 = rename.io.in(i).bits.ftqOffset
@@ -596,7 +596,7 @@ class CtrlBlockImp(
     val cond2 = sameFtqPtr && ftqOffsetDiff === 2.U
     val cond3 = !sameFtqPtr && ftqOffset1 === 0.U
     val cond4 = !sameFtqPtr && ftqOffset1 === 1.U
-    when (fusionDecoder.io.out(i).valid) {
+    when (!disableFusion && fusionDecoder.io.out(i).valid) {
       fusionDecoder.io.out(i).bits.update(rename.io.in(i).bits)
       fusionDecoder.io.out(i).bits.update(dispatch.io.renameIn(i).bits)
       rename.io.in(i).bits.commitType := Mux(cond1, 4.U, Mux(cond2, 5.U, Mux(cond3, 6.U, 7.U)))

@@ -825,6 +825,7 @@ class DecodeUnit(implicit p: Parameters) extends XSModule with DecodeUnitConstan
 
   // output
   val decodedInst: DecodedInst = Wire(new DecodedInst()).decode(ctrl_flow.instr, decode_table)
+  decodedInst.canRobCompress := false.B
 
   val fpDecoder = Module(new FPDecoder)
   fpDecoder.io.instr := ctrl_flow.instr
@@ -1129,7 +1130,6 @@ class DecodeUnit(implicit p: Parameters) extends XSModule with DecodeUnitConstan
     decodedInst.selImm := SelImm.IMM_I
     decodedInst.waitForward := false.B
     decodedInst.blockBackward := false.B
-    decodedInst.canRobCompress := true.B
     decodedInst.exceptionVec(illegalInstr) := io.fromCSR.illegalInst.vsIsOff
   }.elsewhen (isPreW || isPreR || isPreI) {
     decodedInst.selImm := SelImm.IMM_S
@@ -1178,7 +1178,7 @@ class DecodeUnit(implicit p: Parameters) extends XSModule with DecodeUnitConstan
   ))
 
   // Don't compress in the same Rob entry when crossing Ftq entry boundary
-  io.deq.decodedInst.canRobCompress := decodedInst.canRobCompress && !io.enq.ctrlFlow.isLastInFtqEntry
+  io.deq.decodedInst.canRobCompress := false.B
 
   //-------------------------------------------------------------
   // Debug Info

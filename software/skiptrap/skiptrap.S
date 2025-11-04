@@ -15,11 +15,28 @@ _start:
 user_code:
     c.unimp                     # 故意触发非法指令异常
     addi    s0, zero, 42         # 若成功跳过异常，将执行到这里
-    li      t0, 1
-    la      t1, tohost
-    sd      t0, 0(t1)
+    la      t1, skiptrap_store_buf
+    sd      s0, 0(t1)            # 触发一次对内存的写入，便于观察日志
+
+    # 浮点寄存器演示：写入常数 1.5 并做一次浮点加法
+    li      t2, 0x3fc00000       # 1.5f 的 bit pattern
+    fmv.w.x ft0, t2              # 将整数写入 ft0 (F0)
+    fadd.s  ft1, ft0, ft0        # ft1 = 3.0f, 触发 F1 写回
+
+    # 再写入一个两位编号寄存器，覆盖 ft10 (=F10)
+    li      t3, 0x40000000       # 2.0f
+    fmv.w.x ft10, t3
+    fadd.s  ft11, ft10, ft10     # ft11 = 4.0f，触发 F11 写回
+exit:
+    li      t0, 0
+exit:
+    li      t0, 0                # 0 -> DiffTest STATE_GOODTRAP (padding)
+    li      t0, 0
+    li      t0, 0
+    .insn   i 0x6b, 0, x0, t0, 0 # XiangShan custom trap，rs1 携带退出码
+exit_spin:
 1:
-    j       1b
+    j       1b                   # 若仿真未立即停止，保持在安全自旋
 
     .align  2
 trap_handler:
@@ -61,6 +78,11 @@ update_mepc:
     csrw    mcause, x0
     csrw    mtval, x0
     mret
+
+    .section .data
+    .align  3
+skiptrap_store_buf:
+    .dword  0
 
     .section .tohost,"aw",@progbits
     .align  3
