@@ -465,6 +465,37 @@ class DefaultConfig(n: Int = 1) extends Config(
     ++ new BaseConfig(n)
 )
 
+class DefaultNoMisalignConfig(n: Int = 1) extends Config(
+  (new DefaultConfig(n)).alter((site, here, up) => {
+    case XSTileKey => up(XSTileKey).map(_.copy(
+      EnableHardwareStoreMisalign = false,
+      EnableHardwareLoadMisalign = false,
+    ))
+    case DebugOptionsKey => up(DebugOptionsKey).copy(
+      EnableDifftest = false,
+      AlwaysBasicDiff = false,
+    )
+  })
+)
+
+class AlignedAccessConfig(n: Int = 1) extends Config(
+  (new DefaultConfig(n)).alter((site, here, up) => {
+    case XSTileKey => up(XSTileKey).map(_.copy(
+      EnableHardwareStoreMisalign = false,
+      EnableHardwareLoadMisalign = false
+    ))
+  })
+)
+
+class UnalignedAccessConfig(n: Int = 1) extends Config(
+  (new DefaultConfig(n)).alter((site, here, up) => {
+    case XSTileKey => up(XSTileKey).map(_.copy(
+      EnableHardwareStoreMisalign = true,
+      EnableHardwareLoadMisalign = true
+    ))
+  })
+)
+
 class CVMConfig(n: Int = 1) extends Config(
   new CVMCompile
     ++ new DefaultConfig(n)

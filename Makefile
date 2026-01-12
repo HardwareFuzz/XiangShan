@@ -325,6 +325,12 @@ emu-mk: sim-verilog
 emu: $(call docker-deps,emu-mk)
 	$(MAKE) -C ./difftest emu NUM_CORES=$(NUM_CORES) RTL_SUFFIX=$(RTL_SUFFIX)
 
+emu-cov: $(call docker-deps,emu-mk)
+	$(MAKE) -C ./difftest EMU_COVERAGE=1 emu-cov NUM_CORES=$(NUM_CORES) RTL_SUFFIX=$(RTL_SUFFIX)
+
+emu-cov-light: $(call docker-deps,emu-mk)
+	$(MAKE) -C ./difftest EMU_COVERAGE_LIGHT=1 emu-cov-light NUM_CORES=$(NUM_CORES) RTL_SUFFIX=$(RTL_SUFFIX)
+
 # vcs simulation
 simv: sim-verilog
 	$(MAKE) -C ./difftest simv NUM_CORES=$(NUM_CORES) RTL_SUFFIX=$(RTL_SUFFIX)
@@ -353,4 +359,4 @@ include Makefile.test
 
 include src/main/scala/device/standalone/standalone_device.mk
 
-.PHONY: FORCE verilog sim-verilog emu clean help init bump bsp $(REF_SO)
+.PHONY: FORCE verilog sim-verilog emu emu-cov emu-cov-light clean help init bump bsp $(REF_SO)
