@@ -63,6 +63,17 @@ object ArgParser {
     val default = new DefaultConfig(1)
     var firrtlOpts = Array[String]()
     var firtoolOpts = Array[String]()
+    var pendingNumCores: Option[Int] = None
+
+    def applyNumCores(config: Parameters, value: Int): Parameters = {
+      config.alter((site, here, up) => {
+        case XSTileKey => (0 until value) map { i =>
+          up(XSTileKey).head.copy(HartId = i)
+        }
+        case MaxHartIdBits =>
+          log2Up(value) max up(MaxHartIdBits)
+      })
+    }
     @tailrec
     def nextOption(config: Parameters, list: List[String]): Parameters = {
       list match {
@@ -76,19 +87,17 @@ object ArgParser {
           if(tail == Nil) exit(0)
           nextOption(config, tail)
         case "--config" :: confString :: tail =>
-          nextOption(getConfigByName(confString), tail)
+          val base = getConfigByName(confString)
+          val nextConfig = pendingNumCores.map(n => applyNumCores(base, n)).getOrElse(base)
+          nextOption(nextConfig, tail)
         case "--issue" :: issueString :: tail =>
           nextOption(config.alter((site, here, up) => {
             case coupledL2.tl2chi.CHIIssue => issueString
           }), tail)
         case "--num-cores" :: value :: tail =>
-          nextOption(config.alter((site, here, up) => {
-            case XSTileKey => (0 until value.toInt) map { i =>
-              up(XSTileKey).head.copy(HartId = i)
-            }
-            case MaxHartIdBits =>
-              log2Up(value.toInt) max up(MaxHartIdBits)
-          }), tail)
+          val cores = value.toInt
+          pendingNumCores = Some(cores)
+          nextOption(applyNumCores(config, cores), tail)
         case "--hartidbits" :: hartidbits :: tail =>
           nextOption(config.alter((site, here, up) => {
             case MaxHartIdBits => hartidbits.toInt

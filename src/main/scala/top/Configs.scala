@@ -496,6 +496,54 @@ class UnalignedAccessConfig(n: Int = 1) extends Config(
   })
 )
 
+// Memorder-focused noalign variants.
+class MemOrderSB4Config(n: Int = 1) extends Config(
+  (new AlignedAccessConfig(n)).alter((site, here, up) => {
+    case XSTileKey => up(XSTileKey).map(_.copy(
+      StoreBufferSize = 4,
+      StoreBufferThreshold = 3
+    ))
+  })
+)
+
+class MemOrderSB8Config(n: Int = 1) extends Config(
+  (new AlignedAccessConfig(n)).alter((site, here, up) => {
+    case XSTileKey => up(XSTileKey).map(_.copy(
+      StoreBufferSize = 8,
+      StoreBufferThreshold = 5
+    ))
+  })
+)
+
+class MemOrderSQ20Config(n: Int = 1) extends Config(
+  (new AlignedAccessConfig(n)).alter((site, here, up) => {
+    case XSTileKey => up(XSTileKey).map(_.copy(
+      StoreQueueSize = 20,
+      StoreQueueNWriteBanks = 4
+    ))
+  })
+)
+
+class MemOrderLQ24Config(n: Int = 1) extends Config(
+  (new AlignedAccessConfig(n)).alter((site, here, up) => {
+    case XSTileKey => up(XSTileKey).map(_.copy(
+      VirtualLoadQueueSize = 24,
+      LoadQueueRARSize = 24,
+      LoadQueueRAWSize = 12,
+      LoadQueueReplaySize = 24,
+      LoadQueueNWriteBanks = 4
+    ))
+  })
+)
+
+class MemOrderSQNoForwardConfig(n: Int = 1) extends Config(
+  (new AlignedAccessConfig(n)).alter((site, here, up) => {
+    case XSTileKey => up(XSTileKey).map(_.copy(
+      StoreQueueForwardWithMask = false
+    ))
+  })
+)
+
 class CVMConfig(n: Int = 1) extends Config(
   new CVMCompile
     ++ new DefaultConfig(n)

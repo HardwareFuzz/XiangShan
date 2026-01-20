@@ -5,21 +5,22 @@ usage() {
     cat <<'EOF'
 Usage: ./build.sh [options]
 
-Build XiangShan emulator binaries with and without hardware misaligned access support,
-plus their coverage variants (full and light). Outputs land in build_result/ by default.
+Build XiangShan emulator binaries with optional noalign memorder variants.
+Outputs land in build_result/ by default.
 
 Options:
-  -j, --jobs N           Parallel jobs for make (default: nproc)
+  -j, --jobs N           Parallel jobs for make (default: 30)
       --build-root DIR   Output root directory (default: build_result)
-      --num-cores N      Override NUM_CORES (default: 1)
+      --num-cores N      Override NUM_CORES (default: 2)
       --rtl-suffix SUF   Override RTL_SUFFIX (default: sv)
       --align-config C   Config class for aligned-only build (default: AlignedAccessConfig)
       --unalign-config C Config class for unaligned-enabled build (default: UnalignedAccessConfig)
+      --memorder         Build default noalign memorder variants (no coverage)
+      --memorder-only    Only build memorder variants (skip aligned/unaligned)
 
-  Coverage options (choose one, default: all three):
-      --coverage         Build only full coverage variants
-      --coverage-light   Build only light coverage variants (line/user only)
-      --no-coverage      Build only non-coverage variants
+  Coverage options (default: no coverage):
+      --coverage         Build full coverage variants
+      --coverage-light   Build light coverage variants (line/user only)
 
   Configuration options (choose one or both, default: both):
       --aligned          Build only aligned variants
@@ -27,34 +28,37 @@ Options:
 
   -h, --help             Show this help
 
-Output binaries:
-  xiangshan_rv64_aligned              - Aligned-only, no coverage
-  xiangshan_rv64_aligned_cov          - Aligned-only, full coverage
-  xiangshan_rv64_aligned_light        - Aligned-only, light coverage (line/user only)
-  xiangshan_rv64_unaligned            - Unaligned-enabled, no coverage
-  xiangshan_rv64_unaligned_cov        - Unaligned-enabled, full coverage
-  xiangshan_rv64_unaligned_light      - Unaligned-enabled, light coverage (line/user only)
+Output binaries (with core suffix):
+  xiangshan_rv64_aligned_<N>c              - Aligned-only, no coverage
+  xiangshan_rv64_unaligned_<N>c            - Unaligned-enabled, no coverage
+  xiangshan_rv64_noalign_memorder_<id>_<N>c - Memorder variants (noalign, no coverage)
 
 Examples:
-  ./build.sh --coverage-light                    # Build only light coverage variants
-  ./build.sh --coverage-light --aligned          # Build only aligned light coverage
-  ./build.sh --no-coverage --unaligned           # Build only unaligned without coverage
+  ./build.sh --memorder                       # Build memorder variants only
+  ./build.sh --memorder --num-cores 2 -j 30   # Build memorder variants with 30 jobs
 EOF
 }
 
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 MAKE_CMD="${MAKE:-make}"
-MAKE_JOBS="${MAKE_JOBS:-$(nproc)}"
+MAKE_JOBS="${MAKE_JOBS:-30}"
 BUILD_ROOT="${BUILD_ROOT:-$ROOT_DIR/build_result}"
-NUM_CORES="${NUM_CORES:-1}"
+NUM_CORES="${NUM_CORES:-2}"
 RTL_SUFFIX="${RTL_SUFFIX:-sv}"
 ALIGN_CONFIG="${ALIGN_CONFIG:-AlignedAccessConfig}"
 UNALIGN_CONFIG="${UNALIGN_CONFIG:-UnalignedAccessConfig}"
+EXTRA_CONFIGS="${EXTRA_CONFIGS:-}"
 
 # Coverage modes to build: none, full, light
 COV_MODES=()
 # Configurations to build: aligned, unaligned
 CONFIGS=()
+# Extra configs to build (name list)
+EXTRA_CONFIG_LIST=()
+# Memorder variants (noalign, no coverage)
+MEMORDER_VARIANTS=("sb4" "sb8" "sq20" "lq24" "sq-nofwd")
+BUILD_MEMORDER=0
+MEMORDER_ONLY=0
 
 # Always prefer the repo-local mill wrapper
 export PATH="$ROOT_DIR:$PATH"
@@ -68,6 +72,9 @@ while [[ $# -gt 0 ]]; do
         --rtl-suffix) RTL_SUFFIX="$2"; shift 2 ;;
         --align-config) ALIGN_CONFIG="$2"; shift 2 ;;
         --unalign-config) UNALIGN_CONFIG="$2"; shift 2 ;;
+        --memorder) BUILD_MEMORDER=1; shift ;;
+        --memorder-only) BUILD_MEMORDER=1; MEMORDER_ONLY=1; shift ;;
+        --extra-configs) EXTRA_CONFIGS="$2"; shift 2 ;;
         --coverage|-c) COV_MODES+=("full"); shift ;;
         --coverage-light) COV_MODES+=("light"); shift ;;
         --no-coverage|-n) COV_MODES+=("none"); shift ;;
@@ -78,14 +85,22 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Default: build all coverage modes if none specified
+# Default: build no coverage unless explicitly requested
 if [[ ${#COV_MODES[@]} -eq 0 ]]; then
-    COV_MODES=("none" "full" "light")
+    COV_MODES=("none")
 fi
 
 # Default: build all configs if none specified
 if [[ ${#CONFIGS[@]} -eq 0 ]]; then
     CONFIGS=("aligned" "unaligned")
+fi
+
+if [[ -n "$EXTRA_CONFIGS" ]]; then
+    IFS=',' read -r -a EXTRA_CONFIG_LIST <<< "$EXTRA_CONFIGS"
+fi
+
+if [[ $MEMORDER_ONLY -eq 1 ]]; then
+    CONFIGS=()
 fi
 
 mkdir -p "$BUILD_ROOT"
@@ -133,15 +148,26 @@ build_variant() {
     fi
 
     local artifact_name=""
-    case "${name}:${cov_mode}" in
-        aligned:none) artifact_name="xiangshan_rv64_aligned" ;;
-        aligned:full) artifact_name="xiangshan_rv64_aligned_cov" ;;
-        aligned:light) artifact_name="xiangshan_rv64_aligned_light" ;;
-        unaligned:none) artifact_name="xiangshan_rv64_unaligned" ;;
-        unaligned:full) artifact_name="xiangshan_rv64_unaligned_cov" ;;
-        unaligned:light) artifact_name="xiangshan_rv64_unaligned_light" ;;
-        *) echo "Unknown build variant: ${name} (cov_mode=${cov_mode})" >&2; exit 1 ;;
-    esac
+    local core_suffix="_${NUM_CORES}c"
+    if [[ "$name" == "aligned" || "$name" == "unaligned" ]]; then
+        case "${name}:${cov_mode}" in
+            aligned:none) artifact_name="xiangshan_rv64_aligned${core_suffix}" ;;
+            aligned:full) artifact_name="xiangshan_rv64_aligned${core_suffix}_cov" ;;
+            aligned:light) artifact_name="xiangshan_rv64_aligned${core_suffix}_light" ;;
+            unaligned:none) artifact_name="xiangshan_rv64_unaligned${core_suffix}" ;;
+            unaligned:full) artifact_name="xiangshan_rv64_unaligned${core_suffix}_cov" ;;
+            unaligned:light) artifact_name="xiangshan_rv64_unaligned${core_suffix}_light" ;;
+            *) echo "Unknown build variant: ${name} (cov_mode=${cov_mode})" >&2; exit 1 ;;
+        esac
+    else
+        local suffix=""
+        case "$cov_mode" in
+            full) suffix="_cov" ;;
+            light) suffix="_light" ;;
+            none) suffix="" ;;
+        esac
+        artifact_name="xiangshan_rv64_${name}${core_suffix}${suffix}"
+    fi
 
     echo "Building ${artifact_name} (config=${config})..."
     "$MAKE_CMD" -C "$ROOT_DIR" -j"$MAKE_JOBS" \
@@ -149,6 +175,7 @@ build_variant() {
         CONFIG="$config" \
         NUM_CORES="$NUM_CORES" \
         RTL_SUFFIX="$RTL_SUFFIX" \
+        EMU_BUILD_JOBS="$MAKE_JOBS" \
         "$target"
 
     # Refresh helper files after build in case they were regenerated
@@ -203,4 +230,17 @@ for config in "${CONFIGS[@]}"; do
             done
             ;;
     esac
-done
+ done
+
+if [[ $BUILD_MEMORDER -eq 1 ]]; then
+    for variant in "${MEMORDER_VARIANTS[@]}"; do
+        case "$variant" in
+            sb4) build_variant "noalign_memorder_sb4" "MemOrderSB4Config" "none" ;;
+            sb8) build_variant "noalign_memorder_sb8" "MemOrderSB8Config" "none" ;;
+            sq20) build_variant "noalign_memorder_sq20" "MemOrderSQ20Config" "none" ;;
+            lq24) build_variant "noalign_memorder_lq24" "MemOrderLQ24Config" "none" ;;
+            sq-nofwd) build_variant "noalign_memorder_sq-nofwd" "MemOrderSQNoForwardConfig" "none" ;;
+        esac
+    done
+fi
+
