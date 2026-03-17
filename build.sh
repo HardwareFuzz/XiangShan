@@ -23,6 +23,7 @@ Options:
   Coverage modes (default: none):
       --coverage         Build coverage variant (_cov)
       --coverage-light   Build light coverage variant (_cov_light)
+      --no-coverage      Explicitly disable coverage (default)
 
   Maintenance:
       --clean            Remove the selected artifact and its build dir
@@ -81,6 +82,7 @@ while [[ $# -gt 0 ]]; do
     --tag) TAG="$2"; shift 2 ;;
     --coverage) COV_MODE="full"; shift ;;
     --coverage-light) COV_MODE="light"; shift ;;
+    --no-coverage) COV_MODE="none"; shift ;;
     --clean) DO_CLEAN=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) die "unknown option: $1" ;;
