@@ -152,7 +152,6 @@ workdir="$BUILD_ROOT/.work/${name_base}${cov_suffix}"
 if [[ $DO_CLEAN -eq 1 ]]; then
   rm -rf "$workdir" "$artifact"
   echo "cleaned: $artifact"
-  exit 0
 fi
 
 mkdir -p "$BUILD_ROOT" "$OUT_DIR"
