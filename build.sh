@@ -9,10 +9,12 @@ Build XiangShan emulator binaries.
 
 Options:
   -j, --jobs N           Parallel jobs for make (default: 30)
-      --build-root DIR   Output root directory (default: ./build_result)
+      --build-root DIR   Intermediate build root directory (default: ./build_result)
       --isa ISA          ISA tag used in artifact name (rv64|rv64f|rv64fd; default: rv64)
       --cores N          Number of cores (default: 1; this branch supports 1 only)
       --rtl-suffix SUF   RTL suffix passed to make (default: sv)
+      --out-dir DIR      Output directory for the final binary (default: --build-root)
+                         You can also set CX_OUT_DIR (shared across repos) or OUT_DIR.
       --preset NAME      Build preset:
                          aligned | unaligned
       --config CLASS     Override CONFIG (e.g. TLConfig, DefaultConfig, ...)
@@ -27,7 +29,7 @@ Options:
   -h, --help             Show this help
 
 Artifact naming:
-  build_result/xiangshan_<isa>_<tag>_<N>c[_cov|_cov_light]
+  <out-dir>/xiangshan_<isa>_<tag>_<N>c[_cov|_cov_light]
   (tag is optional)
 
 Notes:
@@ -50,6 +52,7 @@ MAKE_CMD="${MAKE:-make}"
 MAKE_JOBS="${MAKE_JOBS:-30}"
 BUILD_ROOT_DEFAULT="$ROOT_DIR/build_result"
 BUILD_ROOT="${BUILD_ROOT:-$BUILD_ROOT_DEFAULT}"
+OUT_DIR_OPT=""
 
 ISA="${ISA:-rv64}"
 CORES="${CORES:-1}"
@@ -71,6 +74,8 @@ while [[ $# -gt 0 ]]; do
     --isa) ISA="$2"; shift 2 ;;
     --cores) CORES="$2"; shift 2 ;;
     --rtl-suffix) RTL_SUFFIX="$2"; shift 2 ;;
+    --out-dir) OUT_DIR_OPT="$2"; shift 2 ;;
+    --out-dir=*) OUT_DIR_OPT="${1#*=}"; shift ;;
     --preset) PRESET="$2"; shift 2 ;;
     --config) CONFIG="$2"; shift 2 ;;
     --tag) TAG="$2"; shift 2 ;;
@@ -139,7 +144,11 @@ if [[ -n "$TAG" ]]; then
   name_base+="_${TAG}"
 fi
 name_base+="_${CORES}c"
-artifact="$BUILD_ROOT/${name_base}${cov_suffix}"
+
+OUT_DIR_DEFAULT="${BUILD_ROOT}"
+OUT_DIR="${OUT_DIR_OPT:-${CX_OUT_DIR:-${OUT_DIR:-${OUT_DIR_DEFAULT}}}}"
+
+artifact="$OUT_DIR/${name_base}${cov_suffix}"
 workdir="$BUILD_ROOT/.work/${name_base}${cov_suffix}"
 
 if [[ $DO_CLEAN -eq 1 ]]; then
@@ -148,7 +157,7 @@ if [[ $DO_CLEAN -eq 1 ]]; then
   exit 0
 fi
 
-mkdir -p "$BUILD_ROOT"
+mkdir -p "$BUILD_ROOT" "$OUT_DIR"
 rm -rf "$workdir"
 mkdir -p "$workdir"
 
