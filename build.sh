@@ -11,7 +11,7 @@ Options:
   -j, --jobs N           Parallel jobs for make (default: 30)
       --build-root DIR   Intermediate build root directory (default: ./build_result)
       --isa ISA          ISA tag used in artifact name (rv64|rv64f|rv64fd; default: rv64)
-      --cores N          Number of cores (default: 1; this branch supports 1 only)
+      --cores N          Number of cores (default: 1)
       --rtl-suffix SUF   RTL suffix passed to make (default: sv)
       --out-dir DIR      Output directory for the final binary (default: --build-root)
                          You can also set CX_OUT_DIR (shared across repos) or OUT_DIR.
@@ -96,10 +96,6 @@ esac
 
 [[ "$CORES" =~ ^[0-9]+$ ]] || die "--cores must be an integer"
 (( CORES >= 1 )) || die "--cores must be >= 1"
-
-if (( CORES != 1 )); then
-  die "this branch supports --cores 1 only (requested: ${CORES})"
-fi
 
 preset_tag=""
 if [[ -n "$PRESET" ]]; then
