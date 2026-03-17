@@ -1,0 +1,154 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage: ./build.sh [options]
+
+Build XiangShan emulator binaries.
+
+Options:
+  -j, --jobs N           Parallel jobs for make (default: 30)
+      --build-root DIR   Output root directory (default: ./build_result)
+      --isa ISA          ISA tag used in artifact name (default: rv64)
+      --cores N          Number of cores (default: 1; this branch supports 1 only)
+      --rtl-suffix SUF   RTL suffix passed to make (default: sv)
+      --config CLASS     Override CONFIG (e.g. TLConfig, DefaultConfig, ...)
+      --tag TAG          Optional tag inserted into artifact name
+
+  Coverage modes (default: none):
+      --coverage         Build coverage variant (_cov)
+      --coverage-light   Build light coverage variant (_cov_light)
+
+  Maintenance:
+      --clean            Remove the selected artifact and its build dir
+  -h, --help             Show this help
+
+Artifact naming:
+  build_result/xiangshan_<isa>_<tag>_<N>c[_cov|_cov_light]
+  (tag is optional)
+
+Notes:
+  --isa currently affects naming only; RTL/config is not ISA-specialized.
+
+Examples:
+  ./build.sh --cores 1
+  ./build.sh --cores 1 --coverage-light
+EOF
+}
+
+die() {
+  echo "error: $*" >&2
+  exit 1
+}
+
+ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
+MAKE_CMD="${MAKE:-make}"
+MAKE_JOBS="${MAKE_JOBS:-30}"
+BUILD_ROOT_DEFAULT="$ROOT_DIR/build_result"
+BUILD_ROOT="${BUILD_ROOT:-$BUILD_ROOT_DEFAULT}"
+
+ISA="${ISA:-rv64}"
+CORES="${CORES:-1}"
+RTL_SUFFIX="${RTL_SUFFIX:-sv}"
+CONFIG=""
+TAG=""
+COV_MODE="none" # none|full|light
+DO_CLEAN=0
+
+# Prefer the repo-local mill wrapper if present.
+export PATH="$ROOT_DIR:$PATH"
+export NOOP_HOME="${NOOP_HOME:-$ROOT_DIR}"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -j|--jobs) MAKE_JOBS="$2"; shift 2 ;;
+    --build-root) BUILD_ROOT="$2"; shift 2 ;;
+    --isa) ISA="$2"; shift 2 ;;
+    --cores) CORES="$2"; shift 2 ;;
+    --rtl-suffix) RTL_SUFFIX="$2"; shift 2 ;;
+    --config) CONFIG="$2"; shift 2 ;;
+    --tag) TAG="$2"; shift 2 ;;
+    --coverage) COV_MODE="full"; shift ;;
+    --coverage-light) COV_MODE="light"; shift ;;
+    --clean) DO_CLEAN=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) die "unknown option: $1" ;;
+  esac
+done
+
+case "$ISA" in
+  rv64) ;;
+  *) die "unsupported --isa '$ISA' (supported: rv64)" ;;
+esac
+
+[[ "$CORES" =~ ^[0-9]+$ ]] || die "--cores must be an integer"
+(( CORES >= 1 )) || die "--cores must be >= 1"
+
+if (( CORES != 1 )); then
+  die "this branch supports --cores 1 only (requested: ${CORES})"
+fi
+
+CONFIG="${CONFIG:-TLConfig}"
+
+cov_suffix=""
+emu_name="emu"
+case "$COV_MODE" in
+  none)
+    cov_suffix=""
+    emu_name="emu"
+    ;;
+  full)
+    cov_suffix="_cov"
+    emu_name="emu-cov"
+    ;;
+  light)
+    cov_suffix="_cov_light"
+    emu_name="emu-cov-light"
+    ;;
+  *) die "internal: unknown COV_MODE '$COV_MODE'" ;;
+esac
+
+name_base="xiangshan_${ISA}"
+if [[ -n "$TAG" ]]; then
+  name_base+="_${TAG}"
+fi
+name_base+="_${CORES}c"
+artifact="$BUILD_ROOT/${name_base}${cov_suffix}"
+workdir="$BUILD_ROOT/.work/${name_base}${cov_suffix}"
+
+if [[ $DO_CLEAN -eq 1 ]]; then
+  rm -rf "$workdir" "$artifact"
+  echo "cleaned: $artifact"
+  exit 0
+fi
+
+mkdir -p "$BUILD_ROOT"
+rm -rf "$workdir"
+mkdir -p "$workdir"
+
+target="emu"
+case "$COV_MODE" in
+  none) target="emu" ;;
+  full) target="emu-cov" ;;
+  light) target="emu-cov-light" ;;
+esac
+
+echo "Building $artifact"
+echo "  CONFIG=$CONFIG"
+echo "  NUM_CORES=$CORES"
+echo "  RTL_SUFFIX=$RTL_SUFFIX"
+echo "  target=$target"
+
+"$MAKE_CMD" -C "$ROOT_DIR" -j"$MAKE_JOBS" \
+  BUILD_DIR="$workdir" \
+  CONFIG="$CONFIG" \
+  NUM_CORES="$CORES" \
+  RTL_SUFFIX="$RTL_SUFFIX" \
+  EMU_BUILD_JOBS="$MAKE_JOBS" \
+  "$target"
+
+bin_path="$workdir/$emu_name"
+[[ -f "$bin_path" ]] || die "expected emulator binary not found: $bin_path"
+cp -f "$bin_path" "$artifact"
+echo "  -> $artifact"
