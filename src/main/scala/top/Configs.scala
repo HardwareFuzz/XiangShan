@@ -600,6 +600,24 @@ class TLConfig(n: Int = 1) extends Config(
 )
 class DefaultConfig(n: Int = 1) extends TLConfig(n) with DeprecatedConfigWarning
 
+class AlignedAccessConfig(n: Int = 1) extends Config(
+  (new TLConfig(n)).alter((site, here, up) => {
+    case XSTileKey => up(XSTileKey).map(_.copy(
+      EnableHardwareStoreMisalign = false,
+      EnableHardwareLoadMisalign = false,
+    ))
+  })
+)
+
+class UnalignedAccessConfig(n: Int = 1) extends Config(
+  (new TLConfig(n)).alter((site, here, up) => {
+    case XSTileKey => up(XSTileKey).map(_.copy(
+      EnableHardwareStoreMisalign = true,
+      EnableHardwareLoadMisalign = true,
+    ))
+  })
+)
+
 class TLCVMConfig(n: Int = 1) extends Config(
   new CVMCompile
     ++ new TLConfig(n)

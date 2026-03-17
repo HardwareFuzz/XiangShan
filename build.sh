@@ -10,9 +10,11 @@ Build XiangShan emulator binaries.
 Options:
   -j, --jobs N           Parallel jobs for make (default: 30)
       --build-root DIR   Output root directory (default: ./build_result)
-      --isa ISA          ISA tag used in artifact name (default: rv64)
+      --isa ISA          ISA tag used in artifact name (rv64|rv64f|rv64fd; default: rv64)
       --cores N          Number of cores (default: 1; this branch supports 1 only)
       --rtl-suffix SUF   RTL suffix passed to make (default: sv)
+      --preset NAME      Build preset:
+                         aligned | unaligned
       --config CLASS     Override CONFIG (e.g. TLConfig, DefaultConfig, ...)
       --tag TAG          Optional tag inserted into artifact name
 
@@ -34,6 +36,7 @@ Notes:
 Examples:
   ./build.sh --cores 1
   ./build.sh --cores 1 --coverage-light
+  ./build.sh --preset aligned --cores 1
 EOF
 }
 
@@ -51,6 +54,7 @@ BUILD_ROOT="${BUILD_ROOT:-$BUILD_ROOT_DEFAULT}"
 ISA="${ISA:-rv64}"
 CORES="${CORES:-1}"
 RTL_SUFFIX="${RTL_SUFFIX:-sv}"
+PRESET=""
 CONFIG=""
 TAG=""
 COV_MODE="none" # none|full|light
@@ -67,6 +71,7 @@ while [[ $# -gt 0 ]]; do
     --isa) ISA="$2"; shift 2 ;;
     --cores) CORES="$2"; shift 2 ;;
     --rtl-suffix) RTL_SUFFIX="$2"; shift 2 ;;
+    --preset) PRESET="$2"; shift 2 ;;
     --config) CONFIG="$2"; shift 2 ;;
     --tag) TAG="$2"; shift 2 ;;
     --coverage) COV_MODE="full"; shift ;;
@@ -78,8 +83,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 case "$ISA" in
-  rv64) ;;
-  *) die "unsupported --isa '$ISA' (supported: rv64)" ;;
+  rv64|rv64f|rv64fd) ;;
+  *) die "unsupported --isa '$ISA' (supported: rv64, rv64f, rv64fd)" ;;
 esac
 
 [[ "$CORES" =~ ^[0-9]+$ ]] || die "--cores must be an integer"
@@ -89,7 +94,27 @@ if (( CORES != 1 )); then
   die "this branch supports --cores 1 only (requested: ${CORES})"
 fi
 
+preset_tag=""
+if [[ -n "$PRESET" ]]; then
+  case "$PRESET" in
+    aligned)
+      CONFIG="${CONFIG:-AlignedAccessConfig}"
+      preset_tag="aligned"
+      ;;
+    unaligned)
+      CONFIG="${CONFIG:-UnalignedAccessConfig}"
+      preset_tag="unaligned"
+      ;;
+    *)
+      die "unknown --preset '$PRESET'"
+      ;;
+  esac
+fi
+
 CONFIG="${CONFIG:-TLConfig}"
+if [[ -z "$TAG" && -n "$preset_tag" ]]; then
+  TAG="$preset_tag"
+fi
 
 cov_suffix=""
 emu_name="emu"
