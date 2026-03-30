@@ -191,6 +191,7 @@ class Sbuffer(implicit p: Parameters)
   extends DCacheModule
     with HasSbufferConst
     with HasPerfEvents {
+  val timer = GTimer()
   val io = IO(new Bundle() {
     val hartId = Input(UInt(hartIdLen.W))
     val in = Vec(EnsbufferWidth, Flipped(Decoupled(new DCacheWordReqWithVaddrAndPfFlag)))  //Todo: store logic only support Width == 2 now
@@ -953,6 +954,12 @@ class Sbuffer(implicit p: Parameters)
 
       difftestCommon.pc           := io.diffStore.diffInfo(i).uop.pc
       difftestCommon.robidx       := io.diffStore.diffInfo(i).uop.robIdx.value
+      val storeClkStart = io.diffStore.diffInfo(i).uop.perfDebugInfo.issueTime
+      val storeClkEnd = timer
+      val storeLogAddr = WireInit(rawAddr)
+      val storeLogDataLo = WireInit(rawData(63, 0))
+      val storeLogDataHi = WireInit(rawData(127, 64))
+      val storeLogMask = WireInit(rawMask)
 
       // Except for normal scalar stores, all other address and data operations are handled within difftest.
       when (isVSLine) {
@@ -976,7 +983,25 @@ class Sbuffer(implicit p: Parameters)
         difftestCommon.data  := wdata
         difftestCommon.highData := 0.U
         difftestCommon.mask     := wmask
+        storeLogAddr := waddr
+        storeLogDataLo := wdata
+        storeLogDataHi := 0.U
+        storeLogMask := wmask
       }
+      XSInfo(storeCommitValid,
+        "store commit pc 0x%x robidx %d addr %x data_lo %x data_hi %x mask %x wline %x vecsplit %x clk_start %d clk_end %d clk_span %d\n",
+        io.diffStore.diffInfo(i).uop.pc,
+        io.diffStore.diffInfo(i).uop.robIdx.value,
+        storeLogAddr,
+        storeLogDataLo,
+        storeLogDataHi,
+        storeLogMask,
+        isWline,
+        isVSLine,
+        storeClkStart,
+        storeClkEnd,
+        storeClkEnd - storeClkStart + 1.U
+      )
     }
     println("PMA Store: diffStoreEventCount = " + diffStoreEventCount)
 
