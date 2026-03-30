@@ -161,6 +161,7 @@ class StoreQueue(implicit p: Parameters) extends XSModule
   with HasCircularQueuePtrHelper
   with HasPerfEvents
   with HasVLSUParameters {
+  val timer = GTimer()
   val io = IO(new Bundle() {
     val hartId = Input(UInt(hartIdLen.W))
     val enq = new SqEnqIO
@@ -557,15 +558,20 @@ class StoreQueue(implicit p: Parameters) extends XSModule
       uop(stWbIndex).perfDebugInfo := io.storeAddrIn(i).bits.uop.perfDebugInfo
       uop(stWbIndex).debug_seqNum := io.storeAddrIn(i).bits.uop.debug_seqNum
     }
+    val storeClkStart = io.storeAddrIn(i).bits.uop.perfDebugInfo.issueTime
+    val storeClkEnd = timer
     XSInfo(io.storeAddrIn(i).fire && !io.storeAddrIn(i).bits.isFrmMisAlignBuf,
-      "store addr write to sq idx %d pc 0x%x miss:%d vaddr %x paddr %x mmio %x isvec %x\n",
+      "store addr write to sq idx %d pc 0x%x miss:%d vaddr %x paddr %x mmio %x isvec %x clk_start %d clk_end %d clk_span %d\n",
       io.storeAddrIn(i).bits.uop.sqIdx.value,
       io.storeAddrIn(i).bits.uop.pc,
       io.storeAddrIn(i).bits.miss,
       io.storeAddrIn(i).bits.vaddr,
       io.storeAddrIn(i).bits.paddr,
       io.storeAddrIn(i).bits.mmio,
-      io.storeAddrIn(i).bits.isvec
+      io.storeAddrIn(i).bits.isvec,
+      storeClkStart,
+      storeClkEnd,
+      storeClkEnd - storeClkStart + 1.U
     )
 
     // re-replinish mmio, for pma/pmp will get mmio one cycle later

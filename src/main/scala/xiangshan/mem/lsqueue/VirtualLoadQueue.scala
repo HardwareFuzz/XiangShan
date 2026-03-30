@@ -76,6 +76,7 @@ class VirtualLoadQueue(implicit p: Parameters) extends XSModule
    */
   val debug_mmio = Reg(Vec(VirtualLoadQueueSize, Bool())) // mmio: inst is an mmio inst
   val debug_paddr = Reg(Vec(VirtualLoadQueueSize, UInt(PAddrBits.W))) // mmio: inst's paddr
+  val timer = GTimer()
 
   //  maintain pointers
   val enqPtrExt = RegInit(VecInit((0 until io.enq.req.length).map(_.U.asTypeOf(new LqPtr))))
@@ -257,8 +258,10 @@ class VirtualLoadQueue(implicit p: Parameters) extends XSModule
         debug_paddr(loadWbIndex) := io.ldin(i).bits.paddr
       }
     }
+    val loadClkStart = io.ldin(i).bits.uop.perfDebugInfo.issueTime
+    val loadClkEnd = timer
     XSInfo(io.ldin(i).valid && !need_rep && need_valid,
-      "load hit write to lq idx %d pc 0x%x vaddr %x paddr %x mask %x forwardData %x forwardMask: %x mmio %x isvec %x\n",
+      "load hit write to lq idx %d pc 0x%x vaddr %x paddr %x mask %x forwardData %x forwardMask: %x mmio %x isvec %x clk_start %d clk_end %d clk_span %d\n",
       io.ldin(i).bits.uop.lqIdx.asUInt,
       io.ldin(i).bits.uop.pc,
       io.ldin(i).bits.vaddr,
@@ -267,7 +270,10 @@ class VirtualLoadQueue(implicit p: Parameters) extends XSModule
       io.ldin(i).bits.forwardData.asUInt,
       io.ldin(i).bits.forwardMask.asUInt,
       io.ldin(i).bits.mmio,
-      io.ldin(i).bits.isvec
+      io.ldin(i).bits.isvec,
+      loadClkStart,
+      loadClkEnd,
+      loadClkEnd - loadClkStart + 1.U
     )
   }
 
