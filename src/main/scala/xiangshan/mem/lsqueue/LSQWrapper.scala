@@ -145,6 +145,7 @@ class LsqWrapper(implicit p: Parameters) extends XSModule
   val loadQueue = Module(new LoadQueue)
   val storeQueue = Module(new StoreQueue)
 
+  loadQueue.io.hartId := io.hartId
   storeQueue.io.hartId := io.hartId
   storeQueue.io.uncacheOutstanding := io.uncacheOutstanding
   storeQueue.io.wfi <> io.wfi

@@ -38,6 +38,7 @@ class VirtualLoadQueue(implicit p: Parameters) extends XSModule
   with HasPerfEvents
   with HasVLSUParameters {
   val io = IO(new Bundle() {
+    val hartId = Input(UInt(hartIdLen.W))
     // control
     val redirect    = Flipped(Valid(new Redirect))
     val vecCommit   = Vec(VecLoadPipelineWidth, Flipped(ValidIO(new FeedbackToLsqIO)))
