@@ -250,7 +250,8 @@ class UncacheEntry(entryIndex: Int)(implicit p: Parameters) extends XSModule
   val ncClkStart = io.ncOut.bits.uop.perfDebugInfo.logRunStartTime
   val ncClkEnd = timer
   XSInfo(io.ncOut.fire,
-    "int load miss write to cbd robidx %d lqidx %d pc 0x%x mmio %x clk_start %d clk_end %d clk_span %d\n",
+    "int load miss hart %d write to cbd robidx %d lqidx %d pc 0x%x mmio %x clk_start %d clk_end %d clk_span %d\n",
+    io.hartId,
     io.ncOut.bits.uop.robIdx.asUInt,
     io.ncOut.bits.uop.lqIdx.asUInt,
     io.ncOut.bits.uop.pc,
@@ -262,7 +263,8 @@ class UncacheEntry(entryIndex: Int)(implicit p: Parameters) extends XSModule
   val mmioClkStart = io.mmioOut.bits.uop.perfDebugInfo.logRunStartTime
   val mmioClkEnd = timer
   XSInfo(io.mmioOut.fire,
-    "int load miss write to cbd robidx %d lqidx %d pc 0x%x mmio %x clk_start %d clk_end %d clk_span %d\n",
+    "int load miss hart %d write to cbd robidx %d lqidx %d pc 0x%x mmio %x clk_start %d clk_end %d clk_span %d\n",
+    io.hartId,
     io.mmioOut.bits.uop.robIdx.asUInt,
     io.mmioOut.bits.uop.lqIdx.asUInt,
     io.mmioOut.bits.uop.pc,

@@ -707,7 +707,8 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
       p"excp $deqHasException flushPipe $isFlushPipe " +
       p"Trap_target 0x${Hexadecimal(io.csr.trapTarget.pc)} exceptionVec ${Binary(exceptionDataRead.bits.exceptionVec.asUInt)}\n")
   XSInfo(io.flushOut.valid && (intrEnable || deqHasException),
-    "trap pc %x intr %d excp %d exceptionVec %x clk_start %d clk_end %d clk_span %d\n",
+    "trap hart %d pc %x intr %d excp %d exceptionVec %x clk_start %d clk_end %d clk_span %d\n",
+    io.hartId,
     debug_deqUop.debug_pc.getOrElse(0.U),
     intrEnable,
     deqHasException,
@@ -853,7 +854,8 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
     val commitClkEnd = timer
 
     XSInfo(io.commits.isCommit && io.commits.commitValid(i),
-      "retired pc %x wen %d ldest %d pdest %x data %x fflags: %b vxsat: %b clk_start %d clk_end %d clk_span %d\n",
+      "retired hart %d pc %x wen %d ldest %d pdest %x data %x fflags: %b vxsat: %b clk_start %d clk_end %d clk_span %d\n",
+      io.hartId,
       robEntries(deqPtrVec(i).value).debug_pc.getOrElse(0.U),
       io.commits.info(i).rfWen,
       io.commits.info(i).debug_ldest.getOrElse(0.U),
