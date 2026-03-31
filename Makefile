@@ -298,10 +298,6 @@ endif
 				cp -f "$(abspath $(DEFAULT_BUILD_DIR))/$$f" "$(abspath $(BUILD_DIR))/"; \
 			fi; \
 		done; \
-		if [ -d "$(abspath $(DEFAULT_BUILD_DIR))/generated-src" ]; then \
-			rm -rf "$(abspath $(BUILD_DIR))/generated-src"; \
-			cp -a "$(abspath $(DEFAULT_BUILD_DIR))/generated-src" "$(abspath $(BUILD_DIR))/generated-src"; \
-		fi; \
 	fi
 
 sim-verilog: $(call docker-deps,$(SIM_TOP_V))
