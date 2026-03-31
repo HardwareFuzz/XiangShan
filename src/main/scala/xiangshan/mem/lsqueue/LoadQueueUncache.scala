@@ -34,6 +34,7 @@ class UncacheEntry(entryIndex: Int)(implicit p: Parameters) extends XSModule
   with HasCircularQueuePtrHelper
   with HasLoadHelper
 {
+  val timer = GTimer()
   val io = IO(new Bundle() {
     /* control */
     val redirect = Flipped(Valid(new Redirect))
@@ -246,19 +247,29 @@ class UncacheEntry(entryIndex: Int)(implicit p: Parameters) extends XSModule
     io.uncache.req.bits.cmd,
     io.uncache.req.bits.mask
   )
+  val ncClkStart = io.ncOut.bits.uop.perfDebugInfo.logRunStartTime
+  val ncClkEnd = timer
   XSInfo(io.ncOut.fire,
-    "int load miss write to cbd robidx %d lqidx %d pc 0x%x mmio %x\n",
+    "int load miss write to cbd robidx %d lqidx %d pc 0x%x mmio %x clk_start %d clk_end %d clk_span %d\n",
     io.ncOut.bits.uop.robIdx.asUInt,
     io.ncOut.bits.uop.lqIdx.asUInt,
     io.ncOut.bits.uop.pc,
-    true.B
+    true.B,
+    ncClkStart,
+    ncClkEnd,
+    ncClkEnd - ncClkStart + 1.U
   )
+  val mmioClkStart = io.mmioOut.bits.uop.perfDebugInfo.logRunStartTime
+  val mmioClkEnd = timer
   XSInfo(io.mmioOut.fire,
-    "int load miss write to cbd robidx %d lqidx %d pc 0x%x mmio %x\n",
+    "int load miss write to cbd robidx %d lqidx %d pc 0x%x mmio %x clk_start %d clk_end %d clk_span %d\n",
     io.mmioOut.bits.uop.robIdx.asUInt,
     io.mmioOut.bits.uop.lqIdx.asUInt,
     io.mmioOut.bits.uop.pc,
-    true.B
+    true.B,
+    mmioClkStart,
+    mmioClkEnd,
+    mmioClkEnd - mmioClkStart + 1.U
   )
 
 }

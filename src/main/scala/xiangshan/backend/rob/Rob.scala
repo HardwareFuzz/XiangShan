@@ -465,6 +465,8 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
       robEntries(enqIndex).perfDebugInfo.foreach(_.enqRsTime := timer)
       robEntries(enqIndex).perfDebugInfo.foreach(_.selectTime := timer)
       robEntries(enqIndex).perfDebugInfo.foreach(_.issueTime := timer)
+      robEntries(enqIndex).perfDebugInfo.foreach(_.runStartTime := 0.U)
+      robEntries(enqIndex).perfDebugInfo.foreach(_.runStartTimeValid := false.B)
       robEntries(enqIndex).perfDebugInfo.foreach(_.writebackTime := timer)
       robEntries(enqIndex).perfDebugInfo.foreach(_.tlbFirstReqTime := timer)
       robEntries(enqIndex).perfDebugInfo.foreach(_.tlbRespTime := timer)
@@ -571,6 +573,8 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
         robEntries(wbIdx).perfDebugInfo.foreach(_.enqRsTime := x.enqRsTime)
         robEntries(wbIdx).perfDebugInfo.foreach(_.selectTime := x.selectTime)
         robEntries(wbIdx).perfDebugInfo.foreach(_.issueTime := x.issueTime)
+        robEntries(wbIdx).perfDebugInfo.foreach(_.runStartTime := x.runStartTime)
+        robEntries(wbIdx).perfDebugInfo.foreach(_.runStartTimeValid := x.runStartTimeValid)
         robEntries(wbIdx).perfDebugInfo.foreach(_.writebackTime := x.writebackTime)
         robEntries(wbIdx).perfDebugInfo.foreach(_.tlbFirstReqTime := x.tlbFirstReqTime)
         robEntries(wbIdx).perfDebugInfo.foreach(_.tlbRespTime := x.tlbRespTime)
@@ -694,10 +698,24 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
   io.readGPAMemAddr.bits.ftqPtr := exceptionDataRead.bits.ftqPtr
   io.readGPAMemAddr.bits.ftqOffset := exceptionDataRead.bits.ftqOffset
 
+  val exceptionPerfDebugInfo = debug_deqUop.perfDebugInfo.getOrElse(0.U.asTypeOf(new PerfDebugInfo))
+  val exceptionClkStart = exceptionPerfDebugInfo.logRunStartTime
+  val exceptionClkEnd = timer
+
   XSDebug(io.flushOut.valid,
     p"generate redirect: pc 0x${Hexadecimal(io.exception.bits.pc)} intr $intrEnable " +
       p"excp $deqHasException flushPipe $isFlushPipe " +
       p"Trap_target 0x${Hexadecimal(io.csr.trapTarget.pc)} exceptionVec ${Binary(exceptionDataRead.bits.exceptionVec.asUInt)}\n")
+  XSInfo(io.flushOut.valid && (intrEnable || deqHasException),
+    "trap pc %x intr %d excp %d exceptionVec %x clk_start %d clk_end %d clk_span %d\n",
+    debug_deqUop.debug_pc.getOrElse(0.U),
+    intrEnable,
+    deqHasException,
+    exceptionDataRead.bits.exceptionVec.asUInt,
+    exceptionClkStart,
+    exceptionClkEnd,
+    exceptionClkEnd - exceptionClkStart + 1.U
+  )
 
 
   /**
@@ -830,15 +848,22 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
       !walk_v(i),
       s"The walking entry($i) should be valid\n")
 
+    val commitPerfDebugInfo = deqDebugInst.perfDebugInfo.getOrElse(0.U.asTypeOf(new PerfDebugInfo))
+    val commitClkStart = commitPerfDebugInfo.logRunStartTime
+    val commitClkEnd = timer
+
     XSInfo(io.commits.isCommit && io.commits.commitValid(i),
-      "retired pc %x wen %d ldest %d pdest %x data %x fflags: %b vxsat: %b\n",
+      "retired pc %x wen %d ldest %d pdest %x data %x fflags: %b vxsat: %b clk_start %d clk_end %d clk_span %d\n",
       robEntries(deqPtrVec(i).value).debug_pc.getOrElse(0.U),
       io.commits.info(i).rfWen,
       io.commits.info(i).debug_ldest.getOrElse(0.U),
       io.commits.info(i).debug_pdest.getOrElse(0.U),
       debug_exuData(deqPtrVec(i).value),
       fflagsDataRead(i),
-      vxsatDataRead(i)
+      vxsatDataRead(i),
+      commitClkStart,
+      commitClkEnd,
+      commitClkEnd - commitClkStart + 1.U
     )
     XSInfo(state === s_walk && io.commits.walkValid(i), "walked pc %x wen %d ldst %d data %x\n",
       robEntries(walkPtrVec(i).value).debug_pc.getOrElse(0.U),
