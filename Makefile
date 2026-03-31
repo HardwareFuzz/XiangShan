@@ -16,6 +16,7 @@
 #***************************************************************************************
 
 BUILD_DIR = ./build
+DEFAULT_BUILD_DIR := ./build
 RTL_DIR = $(BUILD_DIR)/rtl
 
 # import docker support
@@ -290,6 +291,18 @@ endif
 endif
 	sed -i -e "s/\$$error(/\$$fwrite(32\'h80000002, /g" $(RTL_DIR)/*.$(RTL_SUFFIX)
 endif
+	@if [ "$(abspath $(BUILD_DIR))" != "$(abspath $(DEFAULT_BUILD_DIR))" ]; then \
+		mkdir -p $(BUILD_DIR); \
+		for f in chisel_db.cpp chisel_db.h constantin.cpp perfCCT.cpp MbistFrontend.csv MbistL2.csv MbistMemBlk.csv; do \
+			if [ -f "$(abspath $(DEFAULT_BUILD_DIR))/$$f" ]; then \
+				cp -f "$(abspath $(DEFAULT_BUILD_DIR))/$$f" "$(abspath $(BUILD_DIR))/"; \
+			fi; \
+		done; \
+		if [ -d "$(abspath $(DEFAULT_BUILD_DIR))/generated-src" ]; then \
+			rm -rf "$(abspath $(BUILD_DIR))/generated-src"; \
+			cp -a "$(abspath $(DEFAULT_BUILD_DIR))/generated-src" "$(abspath $(BUILD_DIR))/generated-src"; \
+		fi; \
+	fi
 
 sim-verilog: $(call docker-deps,$(SIM_TOP_V))
 

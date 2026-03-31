@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+MILL_VERSION="$(tr -d '[:space:]' < "${ROOT_DIR}/.mill-version")"
+CACHE_DIR="${XDG_CACHE_HOME:-${HOME}/.cache}/cx-riscv-cores/mill"
+MILL_LAUNCHER="${CACHE_DIR}/launcher-${MILL_VERSION}.sh"
+MILL_LAUNCHER_URL="https://raw.githubusercontent.com/com-lihaoyi/mill/${MILL_VERSION}/mill"
+
+download_mill() {
+  mkdir -p "${CACHE_DIR}"
+  local tmp
+  tmp="$(mktemp "${CACHE_DIR}/launcher-${MILL_VERSION}.XXXXXX")"
+
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL "${MILL_LAUNCHER_URL}" -o "${tmp}"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -qO "${tmp}" "${MILL_LAUNCHER_URL}"
+  else
+    echo "error: neither curl nor wget is available to download mill launcher ${MILL_VERSION}" >&2
+    exit 1
+  fi
+
+  chmod +x "${tmp}"
+  mv -f "${tmp}" "${MILL_LAUNCHER}"
+}
+
+if [[ ! -x "${MILL_LAUNCHER}" ]]; then
+  echo "[info] Downloading mill launcher ${MILL_VERSION} to ${MILL_LAUNCHER}" >&2
+  download_mill
+fi
+
+cd "${ROOT_DIR}"
+exec "${MILL_LAUNCHER}" "$@"
