@@ -191,11 +191,15 @@ class PerfDebugInfo(implicit p: Parameters) extends XSBundle {
   val enqRsTime = UInt(XLEN.W)
   val selectTime = UInt(XLEN.W)
   val issueTime = UInt(XLEN.W)
+  val runStartTime = UInt(XLEN.W)
+  val runStartTimeValid = Bool()
   val writebackTime = UInt(XLEN.W)
   // val commitTime = UInt(XLEN.W)
   val runahead_checkpoint_id = UInt(XLEN.W)
   val tlbFirstReqTime = UInt(XLEN.W)
   val tlbRespTime = UInt(XLEN.W) // when getting hit result (including delay in L2TLB hit)
+
+  def logRunStartTime: UInt = Mux(runStartTimeValid, runStartTime, issueTime)
 }
 
 // Separate LSQ

@@ -465,6 +465,8 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
       robEntries(enqIndex).perfDebugInfo.foreach(_.enqRsTime := timer)
       robEntries(enqIndex).perfDebugInfo.foreach(_.selectTime := timer)
       robEntries(enqIndex).perfDebugInfo.foreach(_.issueTime := timer)
+      robEntries(enqIndex).perfDebugInfo.foreach(_.runStartTime := 0.U)
+      robEntries(enqIndex).perfDebugInfo.foreach(_.runStartTimeValid := false.B)
       robEntries(enqIndex).perfDebugInfo.foreach(_.writebackTime := timer)
       robEntries(enqIndex).perfDebugInfo.foreach(_.tlbFirstReqTime := timer)
       robEntries(enqIndex).perfDebugInfo.foreach(_.tlbRespTime := timer)
@@ -571,6 +573,8 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
         robEntries(wbIdx).perfDebugInfo.foreach(_.enqRsTime := x.enqRsTime)
         robEntries(wbIdx).perfDebugInfo.foreach(_.selectTime := x.selectTime)
         robEntries(wbIdx).perfDebugInfo.foreach(_.issueTime := x.issueTime)
+        robEntries(wbIdx).perfDebugInfo.foreach(_.runStartTime := x.runStartTime)
+        robEntries(wbIdx).perfDebugInfo.foreach(_.runStartTimeValid := x.runStartTimeValid)
         robEntries(wbIdx).perfDebugInfo.foreach(_.writebackTime := x.writebackTime)
         robEntries(wbIdx).perfDebugInfo.foreach(_.tlbFirstReqTime := x.tlbFirstReqTime)
         robEntries(wbIdx).perfDebugInfo.foreach(_.tlbRespTime := x.tlbRespTime)
@@ -695,7 +699,7 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
   io.readGPAMemAddr.bits.ftqOffset := exceptionDataRead.bits.ftqOffset
 
   val exceptionPerfDebugInfo = debug_deqUop.perfDebugInfo.getOrElse(0.U.asTypeOf(new PerfDebugInfo))
-  val exceptionClkStart = exceptionPerfDebugInfo.issueTime
+  val exceptionClkStart = exceptionPerfDebugInfo.logRunStartTime
   val exceptionClkEnd = timer
 
   XSDebug(io.flushOut.valid,
@@ -845,7 +849,7 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
       s"The walking entry($i) should be valid\n")
 
     val commitPerfDebugInfo = deqDebugInst.perfDebugInfo.getOrElse(0.U.asTypeOf(new PerfDebugInfo))
-    val commitClkStart = commitPerfDebugInfo.issueTime
+    val commitClkStart = commitPerfDebugInfo.logRunStartTime
     val commitClkEnd = timer
 
     XSInfo(io.commits.isCommit && io.commits.commitValid(i),

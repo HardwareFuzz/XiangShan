@@ -558,7 +558,7 @@ class StoreQueue(implicit p: Parameters) extends XSModule
       uop(stWbIndex).perfDebugInfo := io.storeAddrIn(i).bits.uop.perfDebugInfo
       uop(stWbIndex).debug_seqNum := io.storeAddrIn(i).bits.uop.debug_seqNum
     }
-    val storeClkStart = io.storeAddrIn(i).bits.uop.perfDebugInfo.issueTime
+    val storeClkStart = io.storeAddrIn(i).bits.uop.perfDebugInfo.logRunStartTime
     val storeClkEnd = timer
     XSInfo(io.storeAddrIn(i).fire && !io.storeAddrIn(i).bits.isFrmMisAlignBuf,
       "store addr write to sq idx %d pc 0x%x miss:%d vaddr %x paddr %x mmio %x isvec %x clk_start %d clk_end %d clk_span %d\n",

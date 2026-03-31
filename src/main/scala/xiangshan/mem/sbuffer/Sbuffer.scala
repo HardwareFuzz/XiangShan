@@ -954,7 +954,7 @@ class Sbuffer(implicit p: Parameters)
 
       difftestCommon.pc           := io.diffStore.diffInfo(i).uop.pc
       difftestCommon.robidx       := io.diffStore.diffInfo(i).uop.robIdx.value
-      val storeClkStart = io.diffStore.diffInfo(i).uop.perfDebugInfo.issueTime
+      val storeClkStart = io.diffStore.diffInfo(i).uop.perfDebugInfo.logRunStartTime
       val storeClkEnd = timer
       val storeLogAddr = WireInit(rawAddr)
       val storeLogDataLo = WireInit(rawData(63, 0))

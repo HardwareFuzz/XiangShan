@@ -258,7 +258,7 @@ class VirtualLoadQueue(implicit p: Parameters) extends XSModule
         debug_paddr(loadWbIndex) := io.ldin(i).bits.paddr
       }
     }
-    val loadClkStart = io.ldin(i).bits.uop.perfDebugInfo.issueTime
+    val loadClkStart = io.ldin(i).bits.uop.perfDebugInfo.logRunStartTime
     val loadClkEnd = timer
     XSInfo(io.ldin(i).valid && !need_rep && need_valid,
       "load hit write to lq idx %d pc 0x%x vaddr %x paddr %x mask %x forwardData %x forwardMask: %x mmio %x isvec %x clk_start %d clk_end %d clk_span %d\n",

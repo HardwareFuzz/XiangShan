@@ -4,7 +4,7 @@ import org.chipsalliance.cde.config.Parameters
 import chisel3._
 import chisel3.util._
 import utils.MathUtils
-import utility.HasCircularQueuePtrHelper
+import utility.{GTimer, HasCircularQueuePtrHelper}
 import xiangshan._
 import xiangshan.backend.Bundles._
 import xiangshan.backend.datapath.DataConfig.VlData
@@ -424,6 +424,12 @@ object EntryBundles extends HasCircularQueuePtrHelper {
     entryUpdate.status.issueTimer                     := Mux(validReg && status.issued, updateIssueTimer, 0.U)
     entryUpdate.status.deqPortIdx                     := Mux(commonIn.deqSel, commonIn.deqPortIdxWrite, Mux(status.issued, status.deqPortIdx, 0.U))
     entryUpdate.payload                               := entryReg.payload
+    entryReg.payload.debug.zip(entryUpdate.payload.debug).foreach { case (regDebug, updateDebug) =>
+      when (commonIn.deqSel && !cancelBypassVec.asUInt.orR && !regDebug.perfDebugInfo.runStartTimeValid) {
+        updateDebug.perfDebugInfo.runStartTime := GTimer() + 1.U
+        updateDebug.perfDebugInfo.runStartTimeValid := true.B
+      }
+    }
   }
 
   def CommonOutConnect(commonOut: CommonOutBundle, common: CommonWireBundle, hasIQWakeup: Option[CommonIQWakeupBundle], validReg: Bool, entryUpdate: EntryBundle, entryReg: EntryBundle, status: Status, commonIn: CommonInBundle, isEnq: Boolean, isComp: Boolean)(implicit p: Parameters, params: IssueBlockParams) = {

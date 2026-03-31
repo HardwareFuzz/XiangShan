@@ -903,10 +903,15 @@ class IssueQueueImp(implicit p: Parameters, params: IssueBlockParams) extends XS
     deq.bits.rcIdx.foreach(_ := deqEntryVec(i).bits.status.srcStatus.map(_.regCacheIdx.get))
     deq.bits.ftqIdx.foreach(_ := deqEntryVec(i).bits.payload.ftqPtr.get)
     deq.bits.ftqOffset.foreach(_ := deqEntryVec(i).bits.payload.ftqOffset.get)
-    deq.bits.perfDebugInfo.foreach(_ := deqEntryVec(i).bits.payload.debug.get.perfDebugInfo)
+    deq.bits.perfDebugInfo.foreach { debug =>
+      val sourceDebug = deqEntryVec(i).bits.payload.debug.get.perfDebugInfo
+      debug := sourceDebug
+      debug.selectTime := GTimer()
+      debug.runStartTime := Mux(sourceDebug.runStartTimeValid, sourceDebug.runStartTime, GTimer() + 1.U)
+      debug.runStartTimeValid := true.B
+      debug.issueTime := GTimer() + 1.U
+    }
     deq.bits.debug_seqNum.foreach(_ := deqEntryVec(i).bits.payload.debug.get.debug_seqNum)
-    deq.bits.perfDebugInfo.foreach(_.selectTime := GTimer())
-    deq.bits.perfDebugInfo.foreach(_.issueTime := GTimer() + 1.U)
   }
 
   val deqDelay = Reg(params.genIssueValidBundle)
