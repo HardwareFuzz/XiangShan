@@ -159,6 +159,7 @@ class LoadQueue(implicit p: Parameters) extends XSModule
   with HasPerfEvents
 {
   val io = IO(new Bundle() {
+    val hartId = Input(UInt(hartIdLen.W))
     val redirect = Flipped(Valid(new Redirect))
     val vecFeedback = Vec(VecLoadPipelineWidth, Flipped(ValidIO(new FeedbackToLsqIO)))
     val enq = new LqEnqIO
@@ -252,6 +253,7 @@ class LoadQueue(implicit p: Parameters) extends XSModule
    * VirtualLoadQueue
    */
   virtualLoadQueue.io.redirect      <> io.redirect
+  virtualLoadQueue.io.hartId        := io.hartId
   virtualLoadQueue.io.vecCommit     <> io.vecFeedback
   virtualLoadQueue.io.enq           <> io.enq
   virtualLoadQueue.io.ldin          <> io.ldu.ldin // from load_s3
@@ -296,6 +298,7 @@ class LoadQueue(implicit p: Parameters) extends XSModule
    * Load uncache buffer
    */
   uncacheBuffer.io.redirect <> io.redirect
+  uncacheBuffer.io.hartId   := io.hartId
   uncacheBuffer.io.mmioOut <> io.ldout
   uncacheBuffer.io.ncOut <> io.ncOut
   uncacheBuffer.io.mmioRawData <> io.ld_raw_data
