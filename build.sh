@@ -148,6 +148,7 @@ OUT_DIR="${OUT_DIR_OPT:-${CX_OUT_DIR:-${OUT_DIR:-${OUT_DIR_DEFAULT}}}}"
 
 artifact="$OUT_DIR/${name_base}${cov_suffix}"
 workdir="$BUILD_ROOT/.work/${name_base}${cov_suffix}"
+build_meta_file="$workdir/.build-meta"
 
 if [[ $DO_CLEAN -eq 1 ]]; then
   rm -rf "$workdir" "$artifact"
@@ -155,8 +156,6 @@ if [[ $DO_CLEAN -eq 1 ]]; then
 fi
 
 mkdir -p "$BUILD_ROOT" "$OUT_DIR"
-rm -rf "$workdir"
-mkdir -p "$workdir"
 
 target="emu"
 case "$COV_MODE" in
@@ -164,6 +163,26 @@ case "$COV_MODE" in
   full) target="emu-cov" ;;
   light) target="emu-cov-light" ;;
 esac
+
+build_meta=$(cat <<EOF
+ISA=${ISA}
+CORES=${CORES}
+RTL_SUFFIX=${RTL_SUFFIX}
+PRESET=${PRESET}
+CONFIG=${CONFIG}
+TAG=${TAG}
+COV_MODE=${COV_MODE}
+TARGET=${target}
+EOF
+)
+
+if [[ -f "$build_meta_file" ]]; then
+  if [[ "$(cat "$build_meta_file")" != "$build_meta" ]]; then
+    rm -rf "$workdir"
+  fi
+fi
+mkdir -p "$workdir"
+printf '%s\n' "$build_meta" > "$build_meta_file"
 
 echo "Building $artifact"
 echo "  CONFIG=$CONFIG"

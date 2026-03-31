@@ -16,6 +16,7 @@
 #***************************************************************************************
 
 BUILD_DIR = ./build
+DEFAULT_BUILD_DIR := ./build
 RTL_DIR = $(BUILD_DIR)/rtl
 
 # import docker support
@@ -43,6 +44,7 @@ RTL_SUFFIX ?= sv
 TOP_V = $(RTL_DIR)/$(TOP).$(RTL_SUFFIX)
 SIM_TOP_V = $(RTL_DIR)/$(SIM_TOP).$(RTL_SUFFIX)
 JAR = $(BUILD_DIR)/xsgen.jar
+MILL ?= $(if $(wildcard $(abspath ./mill)),$(abspath ./mill),mill)
 
 SCALA_FILE = $(shell find ./src/main/scala -name '*.scala')
 TEST_FILE = $(shell find ./src/test/scala -name '*.scala')
@@ -236,29 +238,30 @@ endif
 .DEFAULT_GOAL = verilog
 
 help:
-	mill -i xiangshan.runMain $(FPGATOP) --help
+	$(MILL) -i xiangshan.runMain $(FPGATOP) --help
 
 version:
-	mill -i xiangshan.runMain $(FPGATOP) --version
+	$(MILL) -i xiangshan.runMain $(FPGATOP) --version
 
 jar:
-	mill -i xiangshan.assembly
+	$(MILL) -i xiangshan.assembly
 
 $(JAR): FORCE
-	mill -i xiangshan.test.assembly
+	$(MILL) -i xiangshan.test.assembly
 	@mkdir -p $(@D); \
-	JAR_REF=$(shell mill -i show xiangshan.test.assembly 2> /dev/null); \
+	JAR_REF=$(shell $(MILL) -i show xiangshan.test.assembly 2> /dev/null); \
 	[ ! -z $${JAR_REF} ] && echo $${JAR_REF} | sed 's/"//g' | awk -F: '{print $$4}' \
 		| xargs -I{} cp {} $@
 test-jar: $(call docker-deps,$(JAR))
 
 comp:
-	mill -i xiangshan.compile
-	mill -i xiangshan.test.compile
+	$(MILL) -i xiangshan.compile
+	$(MILL) -i xiangshan.test.compile
 
 $(TOP_V): $(SCALA_FILE)
 	mkdir -p $(@D)
-	$(TIME_CMD) mill -i $(MILL_BUILD_ARGS) xiangshan.runMain $(FPGATOP) \
+	BUILD_DIR="$(abspath $(BUILD_DIR))" NOOP_HOME="$(abspath .)" \
+	$(TIME_CMD) $(MILL) -i $(MILL_BUILD_ARGS) xiangshan.runMain $(FPGATOP) \
 		--target-dir $(@D) --config $(CONFIG) --issue $(ISSUE) \
 		--num-cores $(NUM_CORES) $(TOPMAIN_ARGS)
 ifeq ($(CHISEL_TARGET),systemverilog)
@@ -272,7 +275,8 @@ $(SIM_TOP_V): $(SCALA_FILE) $(TEST_FILE)
 	mkdir -p $(@D)
 	@echo -e "\n[mill] Generating Verilog files..." > $(TIMELOG)
 	@date -R | tee -a $(TIMELOG)
-	$(TIME_CMD) mill -i $(MILL_BUILD_ARGS) xiangshan.test.runMain $(SIMTOP) \
+	BUILD_DIR="$(abspath $(BUILD_DIR))" NOOP_HOME="$(abspath .)" \
+	$(TIME_CMD) $(MILL) -i $(MILL_BUILD_ARGS) xiangshan.test.runMain $(SIMTOP) \
 		--target-dir $(@D) --config $(CONFIG) --issue $(ISSUE) \
 		--num-cores $(NUM_CORES) $(SIM_ARGS) --full-stacktrace
 ifeq ($(CHISEL_TARGET),systemverilog)
@@ -290,6 +294,14 @@ endif
 endif
 	sed -i -e "s/\$$error(/\$$fwrite(32\'h80000002, /g" $(RTL_DIR)/*.$(RTL_SUFFIX)
 endif
+	@if [ "$(abspath $(BUILD_DIR))" != "$(abspath $(DEFAULT_BUILD_DIR))" ]; then \
+		mkdir -p $(BUILD_DIR); \
+		for f in chisel_db.cpp chisel_db.h constantin.cpp perfCCT.cpp perfCCT.h MbistFrontend.csv MbistL2.csv MbistMemBlk.csv; do \
+			if [ -f "$(abspath $(DEFAULT_BUILD_DIR))/$$f" ]; then \
+				cp -f "$(abspath $(DEFAULT_BUILD_DIR))/$$f" "$(abspath $(BUILD_DIR))/"; \
+			fi; \
+		done; \
+	fi
 
 sim-verilog: $(call docker-deps,$(SIM_TOP_V))
 
@@ -314,60 +326,60 @@ bump:
 	git submodule foreach "git fetch origin&&git checkout master&&git reset --hard origin/master"
 
 deps:
-	mill -i __.prepareOffline
-	mill -i xiangshan.resolveFirtoolDeps
+	$(MILL) -i __.prepareOffline
+	$(MILL) -i xiangshan.resolveFirtoolDeps
 
 bsp:
-	mill -i mill.bsp.BSP/install
+	$(MILL) -i mill.bsp.BSP/install
 
 idea:
-	mill -i mill.idea.GenIdea/idea
+	$(MILL) -i mill.idea.GenIdea/idea
 
 check-format:
-	mill xiangshan.checkFormat
+	$(MILL) xiangshan.checkFormat
 
 reformat:
-	mill xiangshan.reformat
+	$(MILL) xiangshan.reformat
 
 # verilator simulation
 emu-mk: sim-verilog
-	$(MAKE) -C ./difftest emu-mk NUM_CORES=$(NUM_CORES) RTL_SUFFIX=$(RTL_SUFFIX)
+	$(MAKE) -C ./difftest NOOP_HOME=$(abspath .) DESIGN_DIR=$(abspath .) CONFIG= emu-mk NUM_CORES=$(NUM_CORES) RTL_SUFFIX=$(RTL_SUFFIX)
 
 emu: $(call docker-deps,emu-mk)
-	$(MAKE) -C ./difftest emu NUM_CORES=$(NUM_CORES) RTL_SUFFIX=$(RTL_SUFFIX)
+	$(MAKE) -C ./difftest NOOP_HOME=$(abspath .) DESIGN_DIR=$(abspath .) CONFIG= emu NUM_CORES=$(NUM_CORES) RTL_SUFFIX=$(RTL_SUFFIX)
 
 emu-cov: $(call docker-deps,emu-mk)
-	$(MAKE) -C ./difftest EMU_COVERAGE=1 emu NUM_CORES=$(NUM_CORES) RTL_SUFFIX=$(RTL_SUFFIX)
+	$(MAKE) -C ./difftest NOOP_HOME=$(abspath .) DESIGN_DIR=$(abspath .) CONFIG= EMU_COVERAGE=1 emu NUM_CORES=$(NUM_CORES) RTL_SUFFIX=$(RTL_SUFFIX)
 
 emu-cov-light: $(call docker-deps,emu-mk)
-	$(MAKE) -C ./difftest EMU_COVERAGE_LIGHT=1 emu NUM_CORES=$(NUM_CORES) RTL_SUFFIX=$(RTL_SUFFIX)
+	$(MAKE) -C ./difftest NOOP_HOME=$(abspath .) DESIGN_DIR=$(abspath .) CONFIG= EMU_COVERAGE_LIGHT=1 emu NUM_CORES=$(NUM_CORES) RTL_SUFFIX=$(RTL_SUFFIX)
 
 gsim: sim-verilog
-	$(MAKE) -C ./difftest emu GSIM=1 SIM_TOP=SimTop DESIGN_DIR=$(NOOP_HOME) NUM_CORES=$(NUM_CORES) RTL_SUFFIX=$(RTL_SUFFIX)
+	$(MAKE) -C ./difftest NOOP_HOME=$(abspath .) DESIGN_DIR=$(abspath .) CONFIG= emu GSIM=1 SIM_TOP=SimTop NUM_CORES=$(NUM_CORES) RTL_SUFFIX=$(RTL_SUFFIX)
 
 # vcs simulation
 simv: sim-verilog
-	$(MAKE) -C ./difftest simv NUM_CORES=$(NUM_CORES) RTL_SUFFIX=$(RTL_SUFFIX)
+	$(MAKE) -C ./difftest NOOP_HOME=$(abspath .) DESIGN_DIR=$(abspath .) CONFIG= simv NUM_CORES=$(NUM_CORES) RTL_SUFFIX=$(RTL_SUFFIX)
 
 simv-run:
-	$(MAKE) -C ./difftest simv-run NUM_CORES=$(NUM_CORES) RTL_SUFFIX=$(RTL_SUFFIX)
+	$(MAKE) -C ./difftest NOOP_HOME=$(abspath .) DESIGN_DIR=$(abspath .) CONFIG= simv-run NUM_CORES=$(NUM_CORES) RTL_SUFFIX=$(RTL_SUFFIX)
 
 # galaxsim simulation
 xsim: sim-verilog
-	$(MAKE) -C ./difftest xsim NUM_CORES=$(NUM_CORES) RTL_SUFFIX=$(RTL_SUFFIX)
+	$(MAKE) -C ./difftest NOOP_HOME=$(abspath .) DESIGN_DIR=$(abspath .) CONFIG= xsim NUM_CORES=$(NUM_CORES) RTL_SUFFIX=$(RTL_SUFFIX)
 
 xsim-run:
-	$(MAKE) -C ./difftest xsim-run NUM_CORES=$(NUM_CORES) RTL_SUFFIX=$(RTL_SUFFIX)
+	$(MAKE) -C ./difftest NOOP_HOME=$(abspath .) DESIGN_DIR=$(abspath .) CONFIG= xsim-run NUM_CORES=$(NUM_CORES) RTL_SUFFIX=$(RTL_SUFFIX)
 
 # palladium simulation
 pldm-build: sim-verilog
-	$(MAKE) -C ./difftest pldm-build NUM_CORES=$(NUM_CORES) RTL_SUFFIX=$(RTL_SUFFIX)
+	$(MAKE) -C ./difftest NOOP_HOME=$(abspath .) DESIGN_DIR=$(abspath .) CONFIG= pldm-build NUM_CORES=$(NUM_CORES) RTL_SUFFIX=$(RTL_SUFFIX)
 
 pldm-run:
-	$(MAKE) -C ./difftest pldm-run NUM_CORES=$(NUM_CORES) RTL_SUFFIX=$(RTL_SUFFIX)
+	$(MAKE) -C ./difftest NOOP_HOME=$(abspath .) DESIGN_DIR=$(abspath .) CONFIG= pldm-run NUM_CORES=$(NUM_CORES) RTL_SUFFIX=$(RTL_SUFFIX)
 
 pldm-debug:
-	$(MAKE) -C ./difftest pldm-debug NUM_CORES=$(NUM_CORES) RTL_SUFFIX=$(RTL_SUFFIX)
+	$(MAKE) -C ./difftest NOOP_HOME=$(abspath .) DESIGN_DIR=$(abspath .) CONFIG= pldm-debug NUM_CORES=$(NUM_CORES) RTL_SUFFIX=$(RTL_SUFFIX)
 
 include Makefile.test
 
