@@ -36,6 +36,7 @@ class UncacheEntry(entryIndex: Int)(implicit p: Parameters) extends XSModule
 {
   val timer = GTimer()
   val io = IO(new Bundle() {
+    val hartId = Input(UInt(hartIdLen.W))
     /* control */
     val redirect = Flipped(Valid(new Redirect))
     // redirect flush
@@ -281,6 +282,7 @@ class LoadQueueUncache(implicit p: Parameters) extends XSModule
   with HasMemBlockParameters
 {
   val io = IO(new Bundle() {
+    val hartId = Input(UInt(hartIdLen.W))
     /* control */
     val redirect = Flipped(Valid(new Redirect))
     // mmio commit
@@ -321,6 +323,7 @@ class LoadQueueUncache(implicit p: Parameters) extends XSModule
   // set default IO
   entries.foreach {
     case (e) =>
+      e.io.hartId := io.hartId
       e.io.req.valid := false.B
       e.io.req.bits := DontCare
       e.io.uncache.req.ready := false.B
