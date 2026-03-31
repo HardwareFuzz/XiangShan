@@ -293,7 +293,7 @@ endif
 endif
 	@if [ "$(abspath $(BUILD_DIR))" != "$(abspath $(DEFAULT_BUILD_DIR))" ]; then \
 		mkdir -p $(BUILD_DIR); \
-		for f in chisel_db.cpp chisel_db.h constantin.cpp perfCCT.cpp MbistFrontend.csv MbistL2.csv MbistMemBlk.csv; do \
+		for f in chisel_db.cpp chisel_db.h constantin.cpp perfCCT.cpp perfCCT.h MbistFrontend.csv MbistL2.csv MbistMemBlk.csv; do \
 			if [ -f "$(abspath $(DEFAULT_BUILD_DIR))/$$f" ]; then \
 				cp -f "$(abspath $(DEFAULT_BUILD_DIR))/$$f" "$(abspath $(BUILD_DIR))/"; \
 			fi; \
