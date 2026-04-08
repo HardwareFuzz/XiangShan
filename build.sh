@@ -17,6 +17,7 @@ Options:
                          You can also set CX_OUT_DIR (shared across repos) or OUT_DIR.
       --preset NAME      Build preset:
                          aligned | unaligned
+                         If omitted for the standard minimal build, defaults to `unaligned`
       --config CLASS     Override CONFIG (e.g. TLConfig, DefaultConfig, ...)
       --tag TAG          Optional tag inserted into artifact name
 
@@ -37,7 +38,7 @@ Notes:
   --isa currently affects naming only; RTL/config is not ISA-specialized.
 
 Examples:
-  ./build.sh --cores 1
+  ./build.sh --preset unaligned --cores 1
   ./build.sh --cores 1 --coverage-light
   ./build.sh --preset aligned --cores 1
 EOF
@@ -99,6 +100,11 @@ esac
 
 if (( CORES != 1 )); then
   die "this branch supports --cores 1 only (requested: ${CORES})"
+fi
+
+# The published XiangShan artifacts always carry an explicit alignment tag.
+if [[ -z "$PRESET" && -z "$CONFIG" && -z "$TAG" ]]; then
+  PRESET="unaligned"
 fi
 
 preset_tag=""
