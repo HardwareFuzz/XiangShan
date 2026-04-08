@@ -17,7 +17,7 @@ Options:
                          You can also set CX_OUT_DIR (shared across repos) or OUT_DIR.
       --preset NAME      Build preset:
                          aligned | unaligned
-      --config CLASS     Override CONFIG (e.g. TLConfig, DefaultConfig, ...)
+      --config CLASS     Override CONFIG (e.g. TLMinimalConfig, TLMinimalNoL3Config, DefaultConfig, ...)
       --tag TAG          Optional tag inserted into artifact name
 
   Coverage modes (default: none):
@@ -101,11 +101,11 @@ preset_tag=""
 if [[ -n "$PRESET" ]]; then
   case "$PRESET" in
     aligned)
-      CONFIG="${CONFIG:-AlignedAccessConfig}"
+      CONFIG="${CONFIG:-AlignedAccessTLMinimalConfig}"
       preset_tag="aligned"
       ;;
     unaligned)
-      CONFIG="${CONFIG:-UnalignedAccessConfig}"
+      CONFIG="${CONFIG:-UnalignedAccessTLMinimalConfig}"
       preset_tag="unaligned"
       ;;
     *)
@@ -114,7 +114,7 @@ if [[ -n "$PRESET" ]]; then
   esac
 fi
 
-CONFIG="${CONFIG:-TLConfig}"
+CONFIG="${CONFIG:-TLMinimalConfig}"
 if [[ -z "$TAG" && -n "$preset_tag" ]]; then
   TAG="$preset_tag"
 fi

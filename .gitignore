@@ -64,6 +64,7 @@ _xmsgs/
 .gradle
 bin/
 tmp/
+build_result/
 *.tmp
 *.bak
 *.swp

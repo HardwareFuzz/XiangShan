@@ -58,7 +58,7 @@ case class SoCParameters
   PMAConfigs: Seq[PMAConfigEntry] = Seq(
     PMAConfigEntry(0x0L, range = 0x1000000000000L, a = 3),
     PMAConfigEntry(0x80000000000L, c = true, atomic = true, a = 1, x = true, w = true, r = true),
-    PMAConfigEntry(0x80000000L, a = 1, w = true, r = true),
+    PMAConfigEntry(0x80000000L, a = 1, x = true, w = true, r = true),
     PMAConfigEntry(0x3A000000L, a = 1),
     PMAConfigEntry(0x39002000L, a = 1, w = true, r = true),
     PMAConfigEntry(0x39000000L, a = 1, w = true, r = true),
@@ -68,7 +68,7 @@ case class SoCParameters
     PMAConfigEntry(0x30050000L, a = 1, w = true, r = true), // FIXME: GPU space is cacheable?
     PMAConfigEntry(0x30010000L, a = 1, w = true, r = true),
     PMAConfigEntry(0x20000000L, a = 1, x = true, w = true, r = true),
-    PMAConfigEntry(0x10000000L, a = 1, w = true, r = true),
+    PMAConfigEntry(0x10000000L, a = 1, x = true, w = true, r = true),
     PMAConfigEntry(0)
   ),
   TIMERRange: AddressSet = AddressSet(0x38000000L, TIMERConsts.size - 1),
@@ -328,6 +328,12 @@ trait HaveAXI4MemPort {
       TLXbar() :=*
       bankedNode.get
 
+    if (soc.L3CacheParamsOpt.isEmpty) {
+      mem_xbar :=
+        TLBuffer.chainNode(2, Some("NoL3_debug_dma_to_mem_buffer")) :=
+        l3_xbar.get
+    }
+
     mem_xbar :=
       TLWidthWidget(8) :=
       TLBuffer.chainNode(3, name = Some("PeripheralXbar_to_MemXbar_buffer")) :=
@@ -454,7 +460,9 @@ class MemMisc()(implicit p: Parameters) extends BaseSoC
 
   if (l3_banked_xbar.isDefined) {
     l3_in :*= TLEdgeBuffer(_ => true, Some("L3_in_buffer")) :*= l3_banked_xbar.get
-    l3_banked_xbar.get := TLBuffer.chainNode(2) := l3_xbar.get
+    if (soc.L3CacheParamsOpt.isDefined) {
+      l3_banked_xbar.get := TLBuffer.chainNode(2) := l3_xbar.get
+    }
   }
   bankedNode match {
     case Some(bankBinder) =>
@@ -643,4 +651,3 @@ class MemMisc()(implicit p: Parameters) extends BaseSoC
 
 class SoCMisc()(implicit p: Parameters) extends MemMisc
   with HaveSlaveAXI4Port
-

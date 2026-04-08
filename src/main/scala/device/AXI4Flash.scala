@@ -26,7 +26,7 @@ class AXI4Flash
 (
   address: Seq[AddressSet]
 )(implicit p: Parameters)
-  extends AXI4SlaveModule(address, executable = false)
+  extends AXI4SlaveModule(address, executable = true)
 {
 
   override lazy val module = new AXI4SlaveModuleImp(this){

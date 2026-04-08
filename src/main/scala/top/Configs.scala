@@ -289,6 +289,38 @@ class TLMinimalConfig(n: Int = 1) extends Config(
 )
 class MinimalConfig(n: Int = 1) extends TLMinimalConfig(n) with DeprecatedConfigWarning
 
+// Stable simulation-oriented config for standalone emulator fuzzing:
+// keep L1/L2 enabled so the design still elaborates cleanly, but bypass the
+// problematic L3/OpenLLC coherence path that has been observed to assert in
+// multicore fuzz workloads.
+class TLMinimalNoL3Config(n: Int = 1) extends Config(
+  new TLMinimalConfig(n).alter((site, here, up) => {
+    case SoCParamsKey => up(SoCParamsKey).copy(
+      L3CacheParamsOpt = None,
+      OpenLLCParamsOpt = None
+    )
+  })
+)
+class MinimalNoL3Config(n: Int = 1) extends TLMinimalNoL3Config(n) with DeprecatedConfigWarning
+
+class AlignedAccessTLMinimalConfig(n: Int = 1) extends Config(
+  (new TLMinimalConfig(n)).alter((site, here, up) => {
+    case XSTileKey => up(XSTileKey).map(_.copy(
+      EnableHardwareStoreMisalign = false,
+      EnableHardwareLoadMisalign = false,
+    ))
+  })
+)
+
+class UnalignedAccessTLMinimalConfig(n: Int = 1) extends Config(
+  (new TLMinimalConfig(n)).alter((site, here, up) => {
+    case XSTileKey => up(XSTileKey).map(_.copy(
+      EnableHardwareStoreMisalign = true,
+      EnableHardwareLoadMisalign = true,
+    ))
+  })
+)
+
 // Non-synthesizable MinimalConfig, for fast simulation only
 class TLMinimalSimConfig(n: Int = 1) extends Config(
   new TLMinimalConfig(n).alter((site, here, up) => {
@@ -599,6 +631,24 @@ class TLConfig(n: Int = 1) extends Config(
     ++ new BaseConfig(n)
 )
 class DefaultConfig(n: Int = 1) extends TLConfig(n) with DeprecatedConfigWarning
+
+class AlignedAccessTLMinimalNoL3Config(n: Int = 1) extends Config(
+  (new TLMinimalNoL3Config(n)).alter((site, here, up) => {
+    case XSTileKey => up(XSTileKey).map(_.copy(
+      EnableHardwareStoreMisalign = false,
+      EnableHardwareLoadMisalign = false,
+    ))
+  })
+)
+
+class UnalignedAccessTLMinimalNoL3Config(n: Int = 1) extends Config(
+  (new TLMinimalNoL3Config(n)).alter((site, here, up) => {
+    case XSTileKey => up(XSTileKey).map(_.copy(
+      EnableHardwareStoreMisalign = true,
+      EnableHardwareLoadMisalign = true,
+    ))
+  })
+)
 
 class AlignedAccessConfig(n: Int = 1) extends Config(
   (new TLConfig(n)).alter((site, here, up) => {

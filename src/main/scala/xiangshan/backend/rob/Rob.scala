@@ -706,6 +706,21 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
     p"generate redirect: pc 0x${Hexadecimal(io.exception.bits.pc)} intr $intrEnable " +
       p"excp $deqHasException flushPipe $isFlushPipe " +
       p"Trap_target 0x${Hexadecimal(io.csr.trapTarget.pc)} exceptionVec ${Binary(exceptionDataRead.bits.exceptionVec.asUInt)}\n")
+  if (!env.EnableDebug) {
+    when(io.flushOut.valid && (intrEnable || deqHasException)) {
+      printf(
+        "trap hart %d pc %x intr %d excp %d exceptionVec %x clk_start %d clk_end %d clk_span %d\n",
+        io.hartId,
+        debug_deqUop.debug_pc.getOrElse(0.U),
+        intrEnable,
+        deqHasException,
+        exceptionDataRead.bits.exceptionVec.asUInt,
+        exceptionClkStart,
+        exceptionClkEnd,
+        exceptionClkEnd - exceptionClkStart + 1.U
+      )
+    }
+  }
   XSInfo(io.flushOut.valid && (intrEnable || deqHasException),
     "trap hart %d pc %x intr %d excp %d exceptionVec %x clk_start %d clk_end %d clk_span %d\n",
     io.hartId,
@@ -853,6 +868,24 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
     val commitClkStart = commitPerfDebugInfo.logRunStartTime
     val commitClkEnd = timer
 
+    if (!env.EnableDebug) {
+      when(io.commits.isCommit && io.commits.commitValid(i)) {
+        printf(
+          "retired hart %d pc %x wen %d ldest %d pdest %x data %x fflags: %b vxsat: %b clk_start %d clk_end %d clk_span %d\n",
+          io.hartId,
+          robEntries(deqPtrVec(i).value).debug_pc.getOrElse(0.U),
+          io.commits.info(i).rfWen,
+          io.commits.info(i).debug_ldest.getOrElse(0.U),
+          io.commits.info(i).debug_pdest.getOrElse(0.U),
+          debug_exuData(deqPtrVec(i).value),
+          fflagsDataRead(i),
+          vxsatDataRead(i),
+          commitClkStart,
+          commitClkEnd,
+          commitClkEnd - commitClkStart + 1.U
+        )
+      }
+    }
     XSInfo(io.commits.isCommit && io.commits.commitValid(i),
       "retired hart %d pc %x wen %d ldest %d pdest %x data %x fflags: %b vxsat: %b clk_start %d clk_end %d clk_span %d\n",
       io.hartId,
