@@ -315,10 +315,14 @@ class Rename(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHe
   dontTouch(crossFtqNumVec)
   dontTouch(oddFtqVec)
   val isFusionPair = ((isFusionVec.asUInt << 1).asUInt | isFusionVec.asUInt)(RenameWidth-1, 0).asBools
+  val disableCommitCompressionForDebug = backendParams.basicDebugEn.B
   compressUnit.io.in.zip(io.in).zip(io.validVec.zip(isFusionPair)).foreach{ case((sink, source), (valid, isFusion)) =>
     sink.valid := valid && !io.singleStep
     sink.bits := source.bits
-    sink.bits.canRobCompress := source.bits.canRobCompress && (backendParams.robCompressEn.B || isFusion)
+    // Difftest / provider traces must expose each architectural instruction separately.
+    // Keep ROB compression off in basic debug mode so commit logs can be consumed
+    // instruction-by-instruction by the external diff engine.
+    sink.bits.canRobCompress := source.bits.canRobCompress && !disableCommitCompressionForDebug && (backendParams.robCompressEn.B || isFusion)
   }
   compressUnit.io.oddFtqVec := oddFtqVec
   val needRobFlags = compressUnit.io.out.needRobFlags

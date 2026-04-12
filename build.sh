@@ -11,7 +11,7 @@ Options:
   -j, --jobs N           Parallel jobs for make (default: 30)
       --build-root DIR   Intermediate build root directory (default: ./build_result)
       --isa ISA          ISA tag used in artifact name (rv64|rv64f|rv64fd; default: rv64)
-      --cores N          Number of cores (default: 1; this branch supports 1 only)
+      --cores N          Number of cores (default: 1)
       --rtl-suffix SUF   RTL suffix passed to make (default: sv)
       --out-dir DIR      Output directory for the final binary (default: --build-root)
                          You can also set CX_OUT_DIR (shared across repos) or OUT_DIR.
@@ -35,7 +35,9 @@ Artifact naming:
   (tag is optional)
 
 Notes:
-  --isa currently affects naming only; RTL/config is not ISA-specialized.
+  --isa currently affects artifact naming only; RTL/config is not ISA-specialized.
+  rv64f/rv64fd artifacts intentionally reuse the canonical rv64 build output for the
+  same preset/config/core-count/coverage tuple.
 
 Examples:
   ./build.sh --preset unaligned --cores 1
@@ -98,10 +100,6 @@ esac
 [[ "$CORES" =~ ^[0-9]+$ ]] || die "--cores must be an integer"
 (( CORES >= 1 )) || die "--cores must be >= 1"
 
-if (( CORES != 1 )); then
-  die "this branch supports --cores 1 only (requested: ${CORES})"
-fi
-
 # The published XiangShan artifacts always carry an explicit alignment tag.
 if [[ -z "$PRESET" && -z "$CONFIG" && -z "$TAG" ]]; then
   PRESET="unaligned"
@@ -147,25 +145,46 @@ case "$COV_MODE" in
   *) die "internal: unknown COV_MODE '$COV_MODE'" ;;
 esac
 
-name_base="xiangshan_${ISA}"
+artifact_name_base="xiangshan_${ISA}"
 if [[ -n "$TAG" ]]; then
-  name_base+="_${TAG}"
+  artifact_name_base+="_${TAG}"
 fi
-name_base+="_${CORES}c"
+artifact_name_base+="_${CORES}c"
+
+build_isa="rv64"
+build_name_base="xiangshan_${build_isa}"
+if [[ -n "$TAG" ]]; then
+  build_name_base+="_${TAG}"
+fi
+build_name_base+="_${CORES}c"
 
 OUT_DIR_DEFAULT="${BUILD_ROOT}"
 OUT_DIR="${OUT_DIR_OPT:-${CX_OUT_DIR:-${OUT_DIR:-${OUT_DIR_DEFAULT}}}}"
 
-artifact="$OUT_DIR/${name_base}${cov_suffix}"
-workdir="$BUILD_ROOT/.work/${name_base}${cov_suffix}"
+artifact="$OUT_DIR/${artifact_name_base}${cov_suffix}"
+canonical_artifact="$OUT_DIR/${build_name_base}${cov_suffix}"
+workdir="$BUILD_ROOT/.work/${build_name_base}${cov_suffix}"
 build_meta_file="$workdir/.build-meta"
 
 if [[ $DO_CLEAN -eq 1 ]]; then
-  rm -rf "$workdir" "$artifact"
-  echo "cleaned: $artifact"
+  rm -f "$artifact"
+  if [[ "$ISA" == "$build_isa" ]]; then
+    rm -rf "$workdir"
+    echo "cleaned artifact and canonical build: $artifact"
+  else
+    echo "cleaned alias artifact: $artifact"
+  fi
 fi
 
 mkdir -p "$BUILD_ROOT" "$OUT_DIR"
+
+if [[ "$ISA" != "$build_isa" && -f "$canonical_artifact" ]]; then
+  echo "Building $artifact"
+  echo "  artifact ISA tag=$ISA (reuses canonical artifact $canonical_artifact)"
+  cp -f "$canonical_artifact" "$artifact"
+  echo "  -> $artifact"
+  exit 0
+fi
 
 target="emu"
 case "$COV_MODE" in
@@ -174,8 +193,18 @@ case "$COV_MODE" in
   light) target="emu-cov-light" ;;
 esac
 
+SIM_ARGS_BUILD="${SIM_ARGS:-}"
+# Provider bins rely on compact difftest commit trace plus explicit retire/store/trap prints,
+# so keep the noisy global debug stream disabled unless the caller explicitly opts in.
+for required_arg in --disable-perf --disable-alwaysdb; do
+  case " ${SIM_ARGS_BUILD} " in
+    *" ${required_arg} "*) ;;
+    *) SIM_ARGS_BUILD="${SIM_ARGS_BUILD:+$SIM_ARGS_BUILD }${required_arg}" ;;
+  esac
+done
+
 build_meta=$(cat <<EOF
-ISA=${ISA}
+ISA=${build_isa}
 CORES=${CORES}
 RTL_SUFFIX=${RTL_SUFFIX}
 PRESET=${PRESET}
@@ -183,6 +212,7 @@ CONFIG=${CONFIG}
 TAG=${TAG}
 COV_MODE=${COV_MODE}
 TARGET=${target}
+SIM_ARGS=${SIM_ARGS_BUILD}
 EOF
 )
 
@@ -199,6 +229,10 @@ echo "  CONFIG=$CONFIG"
 echo "  NUM_CORES=$CORES"
 echo "  RTL_SUFFIX=$RTL_SUFFIX"
 echo "  target=$target"
+echo "  sim_args=$SIM_ARGS_BUILD"
+if [[ "$ISA" != "$build_isa" ]]; then
+  echo "  artifact ISA tag=$ISA (reuses canonical build ISA=$build_isa)"
+fi
 
 "$MAKE_CMD" -C "$ROOT_DIR" -j"$MAKE_JOBS" \
   BUILD_DIR="$workdir" \
@@ -206,6 +240,7 @@ echo "  target=$target"
   NUM_CORES="$CORES" \
   RTL_SUFFIX="$RTL_SUFFIX" \
   EMU_BUILD_JOBS="$MAKE_JOBS" \
+  SIM_ARGS="$SIM_ARGS_BUILD" \
   "$target"
 
 bin_path="$workdir/$emu_name"

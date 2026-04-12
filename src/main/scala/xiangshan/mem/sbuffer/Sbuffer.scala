@@ -988,6 +988,25 @@ class Sbuffer(implicit p: Parameters)
         storeLogDataHi := 0.U
         storeLogMask := wmask
       }
+      if (!env.EnableDebug) {
+        when(storeCommitValid) {
+          printf(
+            "store commit hart %d pc 0x%x robidx %d addr %x data_lo %x data_hi %x mask %x wline %x vecsplit %x clk_start %d clk_end %d clk_span %d\n",
+            io.hartId,
+            io.diffStore.diffInfo(i).uop.pc,
+            io.diffStore.diffInfo(i).uop.robIdx.value,
+            storeLogAddr,
+            storeLogDataLo,
+            storeLogDataHi,
+            storeLogMask,
+            isWline,
+            isVSLine,
+            storeClkStart,
+            storeClkEnd,
+            storeClkEnd - storeClkStart + 1.U
+          )
+        }
+      }
       XSInfo(storeCommitValid,
         "store commit hart %d pc 0x%x robidx %d addr %x data_lo %x data_hi %x mask %x wline %x vecsplit %x clk_start %d clk_end %d clk_span %d\n",
         io.hartId,
