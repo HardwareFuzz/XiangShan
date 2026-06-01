@@ -569,6 +569,8 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
     when(wb.valid) {
       debug_exuData(wbIdx) := wb.bits.data
       debug_exuDebug(wbIdx) := wb.bits.debug
+      robEntries(wbIdx).debug_pdest.foreach(_ := wb.bits.pdest)
+      robEntries(wbIdx).debug_rfWen.foreach(_ := wb.bits.params.writeIntRf.B && wb.bits.pdest =/= 0.U)
       wb.bits.perfDebugInfo.foreach { x =>
         robEntries(wbIdx).perfDebugInfo.foreach(_.enqRsTime := x.enqRsTime)
         robEntries(wbIdx).perfDebugInfo.foreach(_.selectTime := x.selectTime)
@@ -867,6 +869,8 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
     val commitPerfDebugInfo = deqDebugInst.perfDebugInfo.getOrElse(0.U.asTypeOf(new PerfDebugInfo))
     val commitClkStart = commitPerfDebugInfo.logRunStartTime
     val commitClkEnd = timer
+    val commitLogRfWen = io.commits.info(i).rfWen || deqDebugInst.debug_rfWen.getOrElse(false.B)
+    val commitLogPdest = deqDebugInst.debug_pdest.getOrElse(io.commits.info(i).debug_pdest.getOrElse(0.U))
 
     if (!env.EnableDebug) {
       when(io.commits.isCommit && io.commits.commitValid(i)) {
@@ -874,9 +878,9 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
           "retired hart %d pc %x wen %d ldest %d pdest %x data %x fflags: %b vxsat: %b clk_start %d clk_end %d clk_span %d\n",
           io.hartId,
           robEntries(deqPtrVec(i).value).debug_pc.getOrElse(0.U),
-          io.commits.info(i).rfWen,
+          commitLogRfWen,
           io.commits.info(i).debug_ldest.getOrElse(0.U),
-          io.commits.info(i).debug_pdest.getOrElse(0.U),
+          commitLogPdest,
           debug_exuData(deqPtrVec(i).value),
           fflagsDataRead(i),
           vxsatDataRead(i),
@@ -890,9 +894,9 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
       "retired hart %d pc %x wen %d ldest %d pdest %x data %x fflags: %b vxsat: %b clk_start %d clk_end %d clk_span %d\n",
       io.hartId,
       robEntries(deqPtrVec(i).value).debug_pc.getOrElse(0.U),
-      io.commits.info(i).rfWen,
+      commitLogRfWen,
       io.commits.info(i).debug_ldest.getOrElse(0.U),
-      io.commits.info(i).debug_pdest.getOrElse(0.U),
+      commitLogPdest,
       debug_exuData(deqPtrVec(i).value),
       fflagsDataRead(i),
       vxsatDataRead(i),
@@ -1623,6 +1627,8 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
       val isRVC = dt_isRVC(ptr)
       val instr = uop.debug_instr.getOrElse(0.U).asTypeOf(new XSInstBitFields)
       val isVLoad = instr.isVecLoad
+      val debugRfWen = robEntries(ptr).debug_rfWen.getOrElse(commitInfo.rfWen)
+      val debugPdest = robEntries(ptr).debug_pdest.getOrElse(commitInfo.debug_pdest.get)
 
       val diffMaxPhyRegs = Seq(MaxPhyRegs, 2 * (V0PhyRegs + VfPhyRegs)).max // For width of wpdest and otherwpdest
       val difftest = DifftestModule(new DiffInstrCommit(diffMaxPhyRegs), delay = 3, dontCare = true)
@@ -1632,11 +1638,11 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
       difftest.valid := io.commits.commitValid(i) && io.commits.isCommit
       difftest.skip := dt_skip
       difftest.isRVC := isRVC
-      difftest.rfwen := io.commits.commitValid(i) && commitInfo.rfWen && commitInfo.debug_ldest.get =/= 0.U
+      difftest.rfwen := io.commits.commitValid(i) && debugRfWen && commitInfo.debug_ldest.get =/= 0.U
       difftest.fpwen := io.commits.commitValid(i) && uop.fpWen
       difftest.vecwen := io.commits.commitValid(i) && uop.debug_vecWen.getOrElse(false.B)
       difftest.v0wen := io.commits.commitValid(i) && (uop.debug_v0Wen.getOrElse(false.B) || isVLoad && instr.VD === 0.U)
-      difftest.wpdest := commitInfo.debug_pdest.get
+      difftest.wpdest := debugPdest
       difftest.wdest := Mux(isVLoad, instr.VD, commitInfo.debug_ldest.get)
       // When merge v0Rat and vecRat, the index of vecRats should starts from V0PhyRegs
       // Split each 128-bit vector reg into two 64-bit regs (lo, hi), so convert index to (2*index, 2*index+1)
