@@ -896,4 +896,3 @@ object FuConfig {
     CsrCfg, DivCfg, FdivCfg, VfdivCfg, VidivCfg
   )
 }
-

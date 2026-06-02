@@ -30,9 +30,10 @@ import xiangshan.backend.Bundles.{DynInst, ExuInput, ExuOutput}
 import xiangshan.backend.fu.NewCSR.TriggerUtil
 import xiangshan.backend.fu.util.SdtrigExt
 import xiangshan.backend.exu.ExeUnitParams
+import xiangshan.backend.rob.RobPtr
 import xiangshan.mem.Bundles._
 import xiangshan.cache.mmu.Pbmt
-import xiangshan.cache.{AtomicWordIO, HasDCacheParameters, MemoryOpConstants, TLError}
+import xiangshan.cache.{AMOALU, AtomicWordIO, HasDCacheParameters, MemoryOpConstants, TLError}
 import xiangshan.cache.mmu.{TlbCmd, TlbRequestIO}
 import difftest._
 
@@ -58,9 +59,12 @@ class AtomicsUnit(val param: ExeUnitParams)(implicit p: Parameters) extends XSMo
       val gpaddr = UInt(XLEN.W)
       val isForVSnonLeafPTE = Bool()
     })
+    val debugPc       = Input(UInt(VAddrBits.W))
+    val debugRobIdx   = Output(new RobPtr)
     val csrCtrl       = Flipped(new CustomCSRCtrlIO)
   })
   io.in.bits.debug_seqNum.foreach(x => PerfCCT.updateInstPos(x, PerfCCT.InstPos.AtFU.id.U, io.in.valid, clock, reset))
+  val timer = GTimer()
   //-------------------------------------------------------
   // Atomics Memory Accsess FSM
   //-------------------------------------------------------
@@ -82,6 +86,7 @@ class AtomicsUnit(val param: ExeUnitParams)(implicit p: Parameters) extends XSMo
   val data_valid = RegInit(false.B)
 
   val uop = Reg(new DynInst)
+  val debugPcReg = RegInit(0.U(VAddrBits.W))
   val isLr = LSUOpType.isLr(uop.fuOpType)
   val isSc = LSUOpType.isSc(uop.fuOpType)
   val isAMOCAS = LSUOpType.isAMOCAS(uop.fuOpType)
@@ -144,6 +149,7 @@ class AtomicsUnit(val param: ExeUnitParams)(implicit p: Parameters) extends XSMo
   io.dtlb.resp.ready   := true.B
 
   io.flush_sbuffer.valid := false.B
+  io.debugRobIdx := uop.robIdx
 
   when (state === s_invalid) {
     when (io.in.fire) {
@@ -152,6 +158,13 @@ class AtomicsUnit(val param: ExeUnitParams)(implicit p: Parameters) extends XSMo
       state := s_tlb_and_flush_sbuffer_req
       have_sent_first_tlb_req := false.B
     }
+  }
+
+  // ROB returns the full architectural PC one beat after the issuing sta uop is accepted.
+  // Capture it here instead of at io.in.fire so AMO store logs stay aligned to the atomic
+  // instruction itself.
+  when (state === s_tlb_and_flush_sbuffer_req && !have_sent_first_tlb_req) {
+    debugPcReg := io.debugPc
   }
 
   when (io.in.fire) {
@@ -348,6 +361,15 @@ class AtomicsUnit(val param: ExeUnitParams)(implicit p: Parameters) extends XSMo
     ))
   }
 
+  def genAtomicLogMask(sizeEncode: UInt): UInt = {
+    require(sizeEncode.getWidth == LSUOpType.Size.width)
+    LookupTree(sizeEncode, List(
+      LSUOpType.W.U -> "h000f".U(16.W),
+      LSUOpType.D.U -> "h00ff".U(16.W),
+      LSUOpType.Q.U -> "hffff".U(16.W)
+    ))
+  }
+
   when (state === s_cache_req) {
     when (io.dcache.req.fire) {
       state := s_cache_resp
@@ -489,7 +511,7 @@ class AtomicsUnit(val param: ExeUnitParams)(implicit p: Parameters) extends XSMo
   io.dtlb.req.bits.checkfullva := true.B
   io.dtlb.resp.ready      := true.B
   io.dtlb.req.bits.cmd    := Mux(isLr, TlbCmd.atom_read, TlbCmd.atom_write)
-  io.dtlb.req.bits.debug.pc := uop.pc
+  io.dtlb.req.bits.debug.pc := debugPcReg
   io.dtlb.req.bits.debug.robIdx := uop.robIdx
   io.dtlb.req.bits.debug.isFirstIssue := false.B
 
@@ -570,6 +592,64 @@ class AtomicsUnit(val param: ExeUnitParams)(implicit p: Parameters) extends XSMo
   pipe_req.amo_mask := genWmaskAMO(paddr, LSUOpType.size(uop.fuOpType))
   pipe_req.amo_cmp  := genWdataAMO(rd, LSUOpType.size(uop.fuOpType))
   pipe_req.miss_fail_cause_evict_btot := false.B
+
+  val atomicLogMask = genAtomicLogMask(LSUOpType.size(uop.fuOpType))
+  val atomicLogAlu = Module(new AMOALU(QuadWordBits))
+  atomicLogAlu.io.mask := atomicLogMask
+  atomicLogAlu.io.cmd := pipe_req.cmd
+  atomicLogAlu.io.lhs := resp_data_wire
+  atomicLogAlu.io.rhs := genWdataAMO(rs2, LSUOpType.size(uop.fuOpType))
+
+  val atomicLogData = Wire(UInt(QuadWordBits.W))
+  atomicLogData := atomicLogAlu.io.out
+  when (pipe_req.cmd === M_XA_SWAP || isSc || isAMOCAS) {
+    atomicLogData := genWdataAMO(rs2, LSUOpType.size(uop.fuOpType))
+  }
+
+  val atomicStoreSucceeded = dcache_resp_id === 1.U
+  val atomicStoreCommitValid =
+    state === s_cache_resp_latch &&
+      !isLr &&
+      !dcache_resp_tl_error.asUInt.orR &&
+      ((!isSc && !isAMOCAS) || atomicStoreSucceeded)
+  val atomicStoreClkStart = uop.perfDebugInfo.logRunStartTime
+  val atomicStoreClkEnd = timer
+
+  if (!env.EnableDebug) {
+    when (atomicStoreCommitValid) {
+      printf(
+        "store commit hart %d pc 0x%x robidx %d addr %x data_lo %x data_hi %x mask %x wline %x vecsplit %x clk_start %d clk_end %d clk_span %d\n",
+        io.hartId,
+        debugPcReg,
+        uop.robIdx.value,
+        paddr,
+        atomicLogData(63, 0),
+        atomicLogData(127, 64),
+        atomicLogMask,
+        0.U,
+        0.U,
+        atomicStoreClkStart,
+        atomicStoreClkEnd,
+        atomicStoreClkEnd - atomicStoreClkStart + 1.U
+      )
+    }
+  }
+  XSInfo(
+    atomicStoreCommitValid,
+    "store commit hart %d pc 0x%x robidx %d addr %x data_lo %x data_hi %x mask %x wline %x vecsplit %x clk_start %d clk_end %d clk_span %d\n",
+    io.hartId,
+    debugPcReg,
+    uop.robIdx.value,
+    paddr,
+    atomicLogData(63, 0),
+    atomicLogData(127, 64),
+    atomicLogMask,
+    0.U,
+    0.U,
+    atomicStoreClkStart,
+    atomicStoreClkEnd,
+    atomicStoreClkEnd - atomicStoreClkStart + 1.U
+  )
 
   if (env.EnableDifftest) {
     val difftest = DifftestModule(new DiffAtomicEvent)

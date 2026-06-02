@@ -37,7 +37,7 @@ import xiangshan.PerfDebugInfo
 import xiangshan.backend.GPAMemEntry
 import xiangshan.backend.{BackendParams, RatToVecExcpMod, RegWriteFromRab, VecExcpInfo}
 import xiangshan.backend.Bundles._
-import xiangshan.backend.decode.isa.bitfield.XSInstBitFields
+import xiangshan.backend.decode.isa.bitfield.{OPCODE5Bit, XSInstBitFields}
 import xiangshan.backend.fu.{FuConfig, FuType}
 import xiangshan.frontend.ftq.FtqPtr
 import xiangshan.mem.{LqPtr, LsqEnqIO, SqPtr}
@@ -138,6 +138,10 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
       val robidx = Input(new RobPtr)
       val pc     = Output(UInt(VAddrBits.W))
     })
+    val atomicDebugInfo = new Bundle {
+      val robidx = Input(new RobPtr)
+      val pc     = Output(UInt(VAddrBits.W))
+    }
   })
 
   val exuWBs: Seq[ValidIO[WriteBackRobBundle]] = io.exuWriteback
@@ -304,6 +308,7 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
   // data for debug
   // Warn: debug_* prefix should not exist in generated verilog.
   val debug_exuData = Reg(Vec(RobSize, UInt(XLEN.W))) //for debug
+  val debug_otherExuData = Reg(Vec(RobSize, UInt(XLEN.W))) //for debug
   val debug_exuDebug = Reg(Vec(RobSize, new DebugBundle)) //for debug
   val debug_lsInfo = RegInit(VecInit(Seq.fill(RobSize)(DebugLsInfo.init)))
   val debug_lsTopdownInfo = RegInit(VecInit(Seq.fill(RobSize)(LsTopdownInfo.init)))
@@ -472,6 +477,7 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
       robEntries(enqIndex).perfDebugInfo.foreach(_.tlbRespTime := timer)
       debug_lsInfo(enqIndex) := DebugLsInfo.init
       debug_lsTopdownInfo(enqIndex) := LsTopdownInfo.init
+      debug_otherExuData(enqIndex) := 0.U
       debug_lqIdxValid(enqIndex) := false.B
       debug_lsIssued(enqIndex) := false.B
       when (enqUop.waitForward) {
@@ -566,11 +572,27 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
   for (wb <- exuWBs) {
     val wbIdx = wb.bits.robIdx.value
     val debug_Uop = robEntries(wbIdx)
+    val isScalarAmocasQ =
+      FuType.isAMO(debug_Uop.debug_fuType.getOrElse(0.U)) &&
+        LSUOpType.isAMOCASQ(debug_Uop.debug_fuOpType.getOrElse(0.U))
+    val primaryIntPdest = debug_Uop.debug_pdest.getOrElse(0.U)
+    val hasPrimaryIntWrite = debug_Uop.debug_rfWen.getOrElse(false.B) && primaryIntPdest =/= 0.U
+    val isSecondaryAmocasQWrite =
+      isScalarAmocasQ &&
+        wb.bits.params.writeIntRf.B &&
+        wb.bits.pdest =/= 0.U &&
+        hasPrimaryIntWrite &&
+        wb.bits.pdest =/= primaryIntPdest
     when(wb.valid) {
-      debug_exuData(wbIdx) := wb.bits.data
       debug_exuDebug(wbIdx) := wb.bits.debug
-      robEntries(wbIdx).debug_pdest.foreach(_ := wb.bits.pdest)
-      robEntries(wbIdx).debug_rfWen.foreach(_ := wb.bits.params.writeIntRf.B && wb.bits.pdest =/= 0.U)
+      when (isSecondaryAmocasQWrite) {
+        debug_otherExuData(wbIdx) := wb.bits.data
+        robEntries(wbIdx).debug_otherPdest.foreach(_(0) := wb.bits.pdest)
+      }.otherwise {
+        debug_exuData(wbIdx) := wb.bits.data
+        robEntries(wbIdx).debug_pdest.foreach(_ := wb.bits.pdest)
+        robEntries(wbIdx).debug_rfWen.foreach(_ := wb.bits.params.writeIntRf.B && wb.bits.pdest =/= 0.U)
+      }
       wb.bits.perfDebugInfo.foreach { x =>
         robEntries(wbIdx).perfDebugInfo.foreach(_.enqRsTime := x.enqRsTime)
         robEntries(wbIdx).perfDebugInfo.foreach(_.selectTime := x.selectTime)
@@ -869,8 +891,33 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
     val commitPerfDebugInfo = deqDebugInst.perfDebugInfo.getOrElse(0.U.asTypeOf(new PerfDebugInfo))
     val commitClkStart = commitPerfDebugInfo.logRunStartTime
     val commitClkEnd = timer
-    val commitLogRfWen = io.commits.info(i).rfWen || deqDebugInst.debug_rfWen.getOrElse(false.B)
+    val commitLogRawInstr = deqDebugInst.debug_instr.getOrElse(0.U)
+    val commitLogInstr = commitLogRawInstr.asTypeOf(new XSInstBitFields)
+    val commitIsFli =
+      commitLogInstr.FUNCT7(6, 2) === "b11110".U &&
+        commitLogInstr.RS2 === 1.U &&
+        commitLogInstr.RM === 0.U &&
+        commitLogInstr.OPCODE5Bit === OPCODE5Bit.OP_FP
+    val commitIsZimop =
+      (BitPat("b1?00??0111??_?????_100_?????_1110011") === commitLogRawInstr) ||
+        (BitPat("b1?00??1???_?????_?????_100_?????_1110011") === commitLogRawInstr)
+    val commitLogArchRfWen = io.commits.info(i).rfWen && io.commits.info(i).debug_ldest.getOrElse(0.U) =/= 0.U
+    val commitLogDebugRfWen = deqDebugInst.debug_rfWen.getOrElse(false.B)
+    val commitLogRfWen =
+      (commitLogArchRfWen || commitLogDebugRfWen) && !commitIsFli
     val commitLogPdest = deqDebugInst.debug_pdest.getOrElse(io.commits.info(i).debug_pdest.getOrElse(0.U))
+    val commitLogData =
+      Mux(
+        commitIsZimop && commitLogRfWen && commitLogPdest === 0.U,
+        0.U(XLEN.W),
+        debug_exuData(deqPtrVec(i).value)
+      )
+    val commitLogOtherPdest = io.commits.info(i).debug_otherPdest.getOrElse(VecInit(Seq.fill(7)(0.U(PhyRegIdxWidth.W))))(0)
+    val commitIsScalarAmocasQLog =
+      FuType.isAMO(deqDebugInst.debug_fuType.getOrElse(0.U)) &&
+        LSUOpType.isAMOCASQ(deqDebugInst.debug_fuOpType.getOrElse(0.U))
+    val commitHasOtherIntWrite = commitIsScalarAmocasQLog && commitLogOtherPdest =/= 0.U
+    val commitOtherLdest = io.commits.info(i).debug_ldest.getOrElse(0.U) + 1.U
 
     if (!env.EnableDebug) {
       when(io.commits.isCommit && io.commits.commitValid(i)) {
@@ -881,13 +928,29 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
           commitLogRfWen,
           io.commits.info(i).debug_ldest.getOrElse(0.U),
           commitLogPdest,
-          debug_exuData(deqPtrVec(i).value),
+          commitLogData,
           fflagsDataRead(i),
           vxsatDataRead(i),
           commitClkStart,
           commitClkEnd,
           commitClkEnd - commitClkStart + 1.U
         )
+        when (commitHasOtherIntWrite) {
+          printf(
+            "retired hart %d pc %x wen %d ldest %d pdest %x data %x fflags: %b vxsat: %b clk_start %d clk_end %d clk_span %d\n",
+            io.hartId,
+            robEntries(deqPtrVec(i).value).debug_pc.getOrElse(0.U),
+            1.U,
+            commitOtherLdest,
+            commitLogOtherPdest,
+            debug_otherExuData(deqPtrVec(i).value),
+            fflagsDataRead(i),
+            vxsatDataRead(i),
+            commitClkStart,
+            commitClkEnd,
+            commitClkEnd - commitClkStart + 1.U
+          )
+        }
       }
     }
     XSInfo(io.commits.isCommit && io.commits.commitValid(i),
@@ -897,7 +960,21 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
       commitLogRfWen,
       io.commits.info(i).debug_ldest.getOrElse(0.U),
       commitLogPdest,
-      debug_exuData(deqPtrVec(i).value),
+      commitLogData,
+      fflagsDataRead(i),
+      vxsatDataRead(i),
+      commitClkStart,
+      commitClkEnd,
+      commitClkEnd - commitClkStart + 1.U
+    )
+    XSInfo(io.commits.isCommit && io.commits.commitValid(i) && commitHasOtherIntWrite,
+      "retired hart %d pc %x wen %d ldest %d pdest %x data %x fflags: %b vxsat: %b clk_start %d clk_end %d clk_span %d\n",
+      io.hartId,
+      robEntries(deqPtrVec(i).value).debug_pc.getOrElse(0.U),
+      1.U,
+      commitOtherLdest,
+      commitLogOtherPdest,
+      debug_otherExuData(deqPtrVec(i).value),
       fflagsDataRead(i),
       vxsatDataRead(i),
       commitClkStart,
@@ -1627,7 +1704,13 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
       val isRVC = dt_isRVC(ptr)
       val instr = uop.debug_instr.getOrElse(0.U).asTypeOf(new XSInstBitFields)
       val isVLoad = instr.isVecLoad
+      val commitIsFli =
+        instr.FUNCT7(6, 2) === "b11110".U &&
+          instr.RS2 === 1.U &&
+          instr.RM === 0.U &&
+          instr.OPCODE5Bit === OPCODE5Bit.OP_FP
       val debugRfWen = robEntries(ptr).debug_rfWen.getOrElse(commitInfo.rfWen)
+      val archRfWen = commitInfo.rfWen && commitInfo.debug_ldest.get =/= 0.U
       val debugPdest = robEntries(ptr).debug_pdest.getOrElse(commitInfo.debug_pdest.get)
 
       val diffMaxPhyRegs = Seq(MaxPhyRegs, 2 * (V0PhyRegs + VfPhyRegs)).max // For width of wpdest and otherwpdest
@@ -1638,23 +1721,34 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
       difftest.valid := io.commits.commitValid(i) && io.commits.isCommit
       difftest.skip := dt_skip
       difftest.isRVC := isRVC
-      difftest.rfwen := io.commits.commitValid(i) && debugRfWen && commitInfo.debug_ldest.get =/= 0.U
-      difftest.fpwen := io.commits.commitValid(i) && uop.fpWen
+      difftest.rfwen := io.commits.commitValid(i) && (archRfWen || debugRfWen) && !commitIsFli
+      difftest.fpwen := io.commits.commitValid(i) && (uop.fpWen || commitIsFli)
       difftest.vecwen := io.commits.commitValid(i) && uop.debug_vecWen.getOrElse(false.B)
       difftest.v0wen := io.commits.commitValid(i) && (uop.debug_v0Wen.getOrElse(false.B) || isVLoad && instr.VD === 0.U)
       difftest.wpdest := debugPdest
       difftest.wdest := Mux(isVLoad, instr.VD, commitInfo.debug_ldest.get)
       // When merge v0Rat and vecRat, the index of vecRats should starts from V0PhyRegs
       // Split each 128-bit vector reg into two 64-bit regs (lo, hi), so convert index to (2*index, 2*index+1)
-      difftest.otherwpdest := debug_VecOtherPdest(ptr).zipWithIndex.flatMap { case (pdest, idx) =>
+      val diffOtherPdestWidth = log2Ceil(diffMaxPhyRegs)
+      val scalarAmocasQOtherPdest =
+        ZeroExt(commitInfo.debug_otherPdest.getOrElse(VecInit(Seq.fill(7)(0.U(PhyRegIdxWidth.W))))(0), diffOtherPdestWidth)
+      val vecOtherPdest = debug_VecOtherPdest(ptr).zipWithIndex.flatMap { case (pdest, idx) =>
         val vecDest = if (idx == 0) {
           Mux(difftest.v0wen, pdest, pdest + V0PhyRegs.U)
         } else {
           pdest + V0PhyRegs.U
         }
         val splitDest = (vecDest << 1).asUInt
-        Seq(splitDest, splitDest + 1.U)
+        Seq(
+          ZeroExt(splitDest, diffOtherPdestWidth),
+          ZeroExt(splitDest + 1.U, diffOtherPdestWidth)
+        )
       }
+      val scalarOtherPdest = Seq(scalarAmocasQOtherPdest) ++ Seq.fill(15)(0.U(diffOtherPdestWidth.W))
+      val commitIsScalarAmocasQ =
+        FuType.isAMO(uop.debug_fuType.getOrElse(0.U)) &&
+          LSUOpType.isAMOCASQ(uop.debug_fuOpType.getOrElse(0.U))
+      difftest.otherwpdest := Mux(commitIsScalarAmocasQ, VecInit(scalarOtherPdest), VecInit(vecOtherPdest))
       difftest.nFused := instrSize - 1.U
       when(difftest.valid) {
         assert(instrSize >= 1.U)
@@ -1711,10 +1805,12 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
 
   //store evetn difftest information
   io.storeDebugInfo := DontCare
+  io.atomicDebugInfo := DontCare
   if (env.EnableDifftest) {
     io.storeDebugInfo.map{port =>
       port.pc := robEntries(port.robidx.value).debug_pc.getOrElse(0.U)
     }
+    io.atomicDebugInfo.pc := robEntries(io.atomicDebugInfo.robidx.value).debug_pc.getOrElse(0.U)
   }
  
   val misPred = io.redirect.valid && io.redirect.bits.isMisPred

@@ -229,6 +229,10 @@ class mem_to_ooo(implicit p: Parameters) extends MemBlockBundle {
     val robidx = Output(new RobPtr)
     val pc     = Input(UInt(VAddrBits.W))
   })
+  val atomicDebugInfo = new Bundle {
+    val robidx = Output(new RobPtr)
+    val pc     = Input(UInt(VAddrBits.W))
+  }
 
   val intWriteback: MixedVec[MixedVec[DecoupledIO[ExuOutput]]] = intSchdParams.genExuOutputDecoupledBundleMemBlock
   val vecWriteback: MixedVec[MixedVec[DecoupledIO[ExuOutput]]] = vecSchdParams.genExuOutputDecoupledBundleMemBlock
@@ -1253,6 +1257,7 @@ class MemBlockInlinedImp(outer: MemBlockInlined) extends LazyModuleImp(outer)
   lsq.io.diffStore := DontCare
   vSegmentUnit.io.vecDifftestInfo := DontCare
   io.mem_to_ooo.storeDebugInfo := DontCare
+  io.mem_to_ooo.atomicDebugInfo := DontCare
   // store event difftest information
   if (env.EnableDifftest) {
     // diffStoreEvent for vSegment, pmaStore and ncStore
@@ -1274,6 +1279,7 @@ class MemBlockInlinedImp(outer: MemBlockInlined) extends LazyModuleImp(outer)
       io.mem_to_ooo.storeDebugInfo(i).robidx := sbuffer.io.diffStore.diffInfo(i).uop.robIdx
       sbuffer.io.diffStore.diffInfo(i).uop.pc := io.mem_to_ooo.storeDebugInfo(i).pc
     }
+    io.mem_to_ooo.atomicDebugInfo.robidx := atomicsUnit.io.debugRobIdx
   }
 
   // lsq.io.vecStoreRetire <> vsFlowQueue.io.sqRelease
@@ -1490,6 +1496,7 @@ class MemBlockInlinedImp(outer: MemBlockInlined) extends LazyModuleImp(outer)
 
   atomicsUnit.io.dcache <> dcache.io.lsu.atomics
   atomicsUnit.io.flush_sbuffer.empty := stIsEmpty
+  atomicsUnit.io.debugPc := io.mem_to_ooo.atomicDebugInfo.pc
 
   atomicsUnit.io.csrCtrl := csrCtrl
 

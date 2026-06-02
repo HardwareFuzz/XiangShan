@@ -509,6 +509,7 @@ class BackendInlinedImp(override val wrapper: BackendInlined)(implicit p: Parame
   // mem io
   io.mem.robLsqIO <> ctrlBlock.io.robio.lsq
   io.mem.storeDebugInfo <> ctrlBlock.io.robio.storeDebugInfo
+  io.mem.atomicDebugInfo <> ctrlBlock.io.robio.atomicDebugInfo
 
   io.frontendSfence := fenceio.sfence
   io.frontendTlbCsr := csrio.tlb
@@ -685,6 +686,10 @@ class BackendMemIO(implicit p: Parameters, params: BackendParams) extends XSBund
     val robidx = Input(new RobPtr)
     val pc     = Output(UInt(VAddrBits.W))
   })
+  val atomicDebugInfo = new Bundle {
+    val robidx = Input(new RobPtr)
+    val pc     = Output(UInt(VAddrBits.W))
+  }
 }
 
 class TopToBackendBundle(implicit p: Parameters) extends XSBundle with HasSoCParameter {

@@ -79,6 +79,7 @@ object RobBundles extends HasCircularQueuePtrHelper {
     val debug_instr      = OptionWrapper(backendParams.debugEn, UInt(32.W))
     val debug_ldest      = OptionWrapper(backendParams.basicDebugEn, UInt(LogicRegsWidth.W))
     val debug_pdest      = OptionWrapper(backendParams.basicDebugEn, UInt(PhyRegIdxWidth.W))
+    val debug_otherPdest = OptionWrapper(backendParams.basicDebugEn, Vec(7, UInt(PhyRegIdxWidth.W)))
     val debug_fuType     = OptionWrapper(backendParams.debugEn, FuType())
     val debug_fusionNum  = OptionWrapper(backendParams.debugEn, UInt(2.W))
     val debug_fuOpType   = OptionWrapper(backendParams.debugEn, FuOpType())
@@ -154,6 +155,7 @@ object RobBundles extends HasCircularQueuePtrHelper {
     robEntry.traceBlockInPipe := robEnq.traceBlockInPipe
     robEntry.debug_ldest.foreach(_ := robEnq.ldest)
     robEntry.debug_pdest.foreach(_ := robEnq.pdest)
+    robEntry.debug_otherPdest.foreach(p => p := 0.U.asTypeOf(p))
     robEntry.debug_fuType.foreach(_ := robEnq.fuType)
     robEntry.debug_fuOpType.foreach(_ := robEnq.fuOpType)
     robEntry.debug_rfWen.foreach(_ := robEnq.rfWen)
@@ -199,6 +201,7 @@ object RobBundles extends HasCircularQueuePtrHelper {
     robCommitEntry.debug_instr.foreach(_ := robEntry.debug_instr.get)
     robCommitEntry.debug_ldest.foreach(_ := robEntry.debug_ldest.get)
     robCommitEntry.debug_pdest.foreach(_ := robEntry.debug_pdest.get)
+    robCommitEntry.debug_otherPdest.foreach(_ := robEntry.debug_otherPdest.get)
     robCommitEntry.debug_fuType.foreach(_ := robEntry.debug_fuType.get)
     robCommitEntry.debug_fusionNum.foreach(_ := robEntry.debug_fusionNum.get)
   }

@@ -801,6 +801,7 @@ class CtrlBlockImp(
   io.robio.robDeqPtr := rob.io.robDeqPtr
 
   io.robio.storeDebugInfo <> rob.io.storeDebugInfo
+  io.robio.atomicDebugInfo <> rob.io.atomicDebugInfo
 
   // rob to backend
   io.robio.commitVType := rob.io.toDecode.commitVType
@@ -935,6 +936,10 @@ class CtrlBlockIO()(implicit p: Parameters, params: BackendParams) extends XSBun
       val robidx = Input(new RobPtr)
       val pc     = Output(UInt(VAddrBits.W))
     })
+    val atomicDebugInfo = new Bundle {
+      val robidx = Input(new RobPtr)
+      val pc     = Output(UInt(VAddrBits.W))
+    }
   }
 
   val toDecode = new Bundle {

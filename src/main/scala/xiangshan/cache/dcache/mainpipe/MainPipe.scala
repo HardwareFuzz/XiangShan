@@ -876,6 +876,8 @@ class MainPipe(implicit p: Parameters) extends DCacheModule with HasPerfEvents w
   io.store_hit_resp.bits.id := s3_req.id
 
   val atomic_hit_resp = Wire(new MainPipeResp)
+  val atomic_hit_resp_success = Wire(Bool())
+  atomic_hit_resp_success := Mux(s3_sc, !s3_sc_fail, Mux(s3_cas, !s3_cas_fail, true.B))
   atomic_hit_resp.source := s3_req.source
   atomic_hit_resp.data := Mux(s3_sc, s3_sc_fail.asUInt, s3_data_quad_word)
   atomic_hit_resp.miss := false.B
@@ -884,7 +886,7 @@ class MainPipe(implicit p: Parameters) extends DCacheModule with HasPerfEvents w
   atomic_hit_resp.tl_error := (s3_l2_error_wb.asUInt | s3_flag_error_beu.asUInt).asTypeOf(new TLError())
   atomic_hit_resp.replay := false.B
   atomic_hit_resp.ack_miss_queue := s3_req.miss
-  atomic_hit_resp.id := lrsc_valid
+  atomic_hit_resp.id := Mux(atomic_hit_resp_success, 1.U(reqIdWidth.W), 0.U(reqIdWidth.W))
   val atomic_replay_resp = Wire(new MainPipeResp)
   atomic_replay_resp.source := s2_req.source
   atomic_replay_resp.data := DontCare

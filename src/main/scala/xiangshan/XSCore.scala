@@ -185,6 +185,7 @@ class XSCoreImp(outer: XSCoreBase) extends LazyModuleImp(outer)
   backend.io.perf.ctrlInfo := DontCare
 
   backend.io.mem.storeDebugInfo <> memBlock.io.mem_to_ooo.storeDebugInfo
+  backend.io.mem.atomicDebugInfo <> memBlock.io.mem_to_ooo.atomicDebugInfo
 
   // top -> memBlock
   memBlock.io.fromTopToBackend.clintTime := io.clintTime
