@@ -10,7 +10,7 @@ Build XiangShan emulator binaries.
 Options:
   -j, --jobs N           Parallel jobs for make (default: 30)
       --build-root DIR   Intermediate build root directory (default: ./build_result)
-      --isa ISA          ISA tag used in artifact name (rv64|rv64f|rv64fd; default: rv64)
+      --isa ISA          ISA tag used in artifact name (rv64f|rv64fd; default: rv64fd)
       --cores N          Number of cores (default: 1)
       --rtl-suffix SUF   RTL suffix passed to make (default: sv)
       --out-dir DIR      Output directory for the final binary (default: --build-root)
@@ -58,7 +58,7 @@ BUILD_ROOT_DEFAULT="$ROOT_DIR/build_result"
 BUILD_ROOT="${BUILD_ROOT:-$BUILD_ROOT_DEFAULT}"
 OUT_DIR_OPT=""
 
-ISA="${ISA:-rv64}"
+ISA="${ISA:-rv64fd}"
 CORES="${CORES:-1}"
 RTL_SUFFIX="${RTL_SUFFIX:-sv}"
 PRESET=""
@@ -93,8 +93,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 case "$ISA" in
-  rv64|rv64f|rv64fd) ;;
-  *) die "unsupported --isa '$ISA' (supported: rv64, rv64f, rv64fd)" ;;
+  rv64f|rv64fd) ;;
+  *) die "unsupported --isa '$ISA' (supported: rv64f, rv64fd)" ;;
 esac
 
 [[ "$CORES" =~ ^[0-9]+$ ]] || die "--cores must be an integer"
