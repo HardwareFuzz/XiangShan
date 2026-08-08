@@ -280,9 +280,6 @@ class LoadQueue(implicit p: Parameters) extends XSModule
    */
   uncacheBuffer.io.redirect <> io.redirect
   uncacheBuffer.io.hartId   := io.hartId
-  uncacheBuffer.io.mmioOut <> io.ldout
-  uncacheBuffer.io.ncOut <> io.ncOut
-  uncacheBuffer.io.mmioRawData <> io.ld_raw_data
   uncacheBuffer.io.bypass <> io.bypass
   uncacheBuffer.io.rob <> io.rob
   uncacheBuffer.io.uncache <> io.uncache
