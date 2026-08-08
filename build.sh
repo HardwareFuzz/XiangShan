@@ -18,7 +18,7 @@ Options:
       --preset NAME      Build preset:
                          aligned | unaligned
                          If omitted for the standard minimal build, defaults to `unaligned`
-      --config CLASS     Override CONFIG (e.g. TLConfig, DefaultConfig, ...)
+      --config CLASS     Override CONFIG (e.g. MinimalConfig, DefaultConfig, ...)
       --tag TAG          Optional tag inserted into artifact name
 
   Coverage modes (default: none):
@@ -122,7 +122,7 @@ if [[ -n "$PRESET" ]]; then
   esac
 fi
 
-CONFIG="${CONFIG:-TLConfig}"
+CONFIG="${CONFIG:-MinimalConfig}"
 if [[ -z "$TAG" && -n "$preset_tag" ]]; then
   TAG="$preset_tag"
 fi
