@@ -175,6 +175,22 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
   val bankNum = 8
   assert(RobSize % bankNum == 0, "RobSize % bankNum must be 0")
   val robEntries = RegInit(VecInit.fill(RobSize)((new RobEntryBundle).Lit(_.valid -> false.B)))
+  // CXTRACE uses a trace-only, non-wrapping identity allocated with each ROB
+  // entry.  A ROB pointer is only unique while the entry is live and therefore
+  // cannot identify dynamic instructions in a long-running trace.
+  val traceTokenEntries = RegInit(VecInit.fill(RobSize)(0.U(64.W)))
+  val traceStartCycleEntries = RegInit(VecInit.fill(RobSize)(0.U(64.W)))
+  val traceTokenValidEntries = RegInit(VecInit.fill(RobSize)(false.B))
+  val traceNextToken = RegInit(0.U(64.W))
+  val traceTermSeq = RegInit(0.U(64.W))
+  val traceInstretSeq = RegInit(0.U(64.W))
+  val traceHeaderPrinted = RegInit(false.B)
+  private val traceIsa = if (XLEN == 64 && HasFPU) "rv64fd" else if (XLEN == 64) "rv64i" else "rv32i"
+  private val traceBuildConfig = if (backendParams.debugEn) "xiangshan_difftest" else "xiangshan"
+  when(!reset.asBool && !traceHeaderPrinted) {
+    printf(s"CXTRACE_HEADER v=2 trace_version=2 core=xiangshan harts=${p(XSTileKey).size} cycle_domain=core_ref_clk cycle_base=first_post_reset_posedge_is_1 interval=inclusive start_kind=backend_alloc end_kind=arch_commit_or_precise_trap isa=$traceIsa build_config=$traceBuildConfig\n")
+    traceHeaderPrinted := true.B
+  }
   // pointers
   // For enqueue ptr, we don't duplicate it since only enqueue needs it.
   val enqPtrVec = Wire(Vec(RenameWidth, new RobPtr))
@@ -203,7 +219,19 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
   io.enq.canAcceptForDispatch := allowEnqueueForDispatch && !hasBlockBackward && rab.io.canEnqForDispatch && vtypeBuffer.io.canEnqForDispatch && !io.fromVecExcpMod.busy
   io.enq.resp := allocatePtrVec
   val canEnqueue = VecInit(io.enq.req.map(req => req.valid && req.bits.firstUop && io.enq.canAccept))
+  val traceCanEnqueue = VecInit(canEnqueue.map(_ && !io.redirect.valid))
   val timer = GTimer()
+  when(traceCanEnqueue.asUInt.orR) {
+    traceNextToken := traceNextToken + PopCount(traceCanEnqueue)
+  }
+  for (i <- 0 until RenameWidth) {
+    when(traceCanEnqueue(i)) {
+      val priorAllocations = if (i == 0) 0.U else PopCount(traceCanEnqueue.take(i))
+      traceTokenEntries(allocatePtrVec(i).value) := traceNextToken + priorAllocations
+      traceStartCycleEntries(allocatePtrVec(i).value) := timer + 1.U
+      traceTokenValidEntries(allocatePtrVec(i).value) := true.B
+    }
+  }
   // robEntries enqueue
   for (i <- 0 until RobSize) {
     val enqOH = VecInit(canEnqueue.zip(allocatePtrVec.map(_.value === i.U)).map(x => x._1 && x._2))
@@ -725,9 +753,21 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
   io.readGPAMemAddr.bits.ftqPtr := exceptionDataRead.bits.ftqPtr
   io.readGPAMemAddr.bits.ftqOffset := exceptionDataRead.bits.ftqOffset
 
-  val exceptionPerfDebugInfo = debug_deqUop.perfDebugInfo.getOrElse(0.U.asTypeOf(new PerfDebugInfo))
-  val exceptionClkStart = exceptionPerfDebugInfo.logRunStartTime
-  val exceptionClkEnd = timer
+  val exceptionStartValid = deqHasException && traceTokenValidEntries(deqPtr.value)
+  val exceptionClkStart = Mux(exceptionStartValid, traceStartCycleEntries(deqPtr.value), 0.U)
+  val exceptionClkEnd = timer + 1.U
+  val exceptionClkSpan = Mux(exceptionStartValid, exceptionClkEnd - exceptionClkStart + 1.U, 0.U)
+  val exceptionTraceToken = traceTokenEntries(deqPtr.value)
+  val exceptionRawInstr = debug_deqUop.debug_instr.getOrElse(0.U)
+  val exceptionInsnLen = Mux(exceptionRawInstr(1, 0) =/= 3.U, 2.U, 4.U)
+  val exceptionInsnForTrace = Mux(exceptionRawInstr(1, 0) =/= 3.U,
+    Cat(0.U(16.W), exceptionRawInstr(15, 0)), exceptionRawInstr)
+
+  assert(!(io.flushOut.valid && deqHasException) || exceptionStartValid,
+    "CXTRACE precise trap is missing ROB allocation metadata")
+  assert(!(io.flushOut.valid && deqHasException) ||
+    (exceptionClkStart >= 1.U && exceptionClkEnd >= exceptionClkStart),
+    "CXTRACE precise-trap cycle interval is invalid")
 
   XSDebug(io.flushOut.valid,
     p"generate redirect: pc 0x${Hexadecimal(io.exception.bits.pc)} intr $intrEnable " +
@@ -744,7 +784,7 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
         exceptionDataRead.bits.exceptionVec.asUInt,
         exceptionClkStart,
         exceptionClkEnd,
-        exceptionClkEnd - exceptionClkStart + 1.U
+        exceptionClkSpan
       )
     }
   }
@@ -757,10 +797,8 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
     exceptionDataRead.bits.exceptionVec.asUInt,
     exceptionClkStart,
     exceptionClkEnd,
-    exceptionClkEnd - exceptionClkStart + 1.U
+    exceptionClkSpan
   )
-
-
   /**
    * Commits (and walk)
    * They share the same width.
@@ -870,6 +908,43 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
   // for instructions that may block others, we don't allow them to commit
   io.commits.commitValid := PriorityMux(commitValidThisLine, (0 until CommitWidth).map(i => (commitValidThisLine.asUInt >> i).asUInt.asTypeOf(io.commits.commitValid)))
 
+  val traceCommitValid = VecInit((0 until CommitWidth).map(i => io.commits.isCommit && io.commits.commitValid(i)))
+  val traceCommitCount = PopCount(traceCommitValid)
+  val traceTrapTerminal = io.flushOut.valid && deqHasException && !intrEnable
+  val traceInterrupt = io.flushOut.valid && intrEnable
+  when(traceTrapTerminal || traceCommitCount.orR) {
+    traceTermSeq := traceTermSeq + traceCommitCount + traceTrapTerminal.asUInt
+    traceInstretSeq := traceInstretSeq + traceCommitCount
+  }
+  when(traceTrapTerminal) {
+    printf(
+      "CXTRACE v=2 event=inst_terminal core=xiangshan hart=%d token=%d term_seq=%d instret_seq=- commit_slot=%d pc=0x%x insn=0x%x insn_len=%d start_cycle=%d end_cycle=%d span=%d start_valid=%d start_kind=backend_alloc end_kind=precise_trap retired=0 trap=1 cause=0x%x priv=%d\n",
+      io.hartId,
+      exceptionTraceToken,
+      traceTermSeq + traceCommitCount,
+      traceCommitCount,
+      debug_deqUop.debug_pc.getOrElse(0.U),
+      exceptionInsnForTrace,
+      exceptionInsnLen,
+      exceptionClkStart,
+      exceptionClkEnd,
+      exceptionClkSpan,
+      exceptionStartValid,
+      io.csr.traceCause,
+      io.csr.tracePriv
+    )
+  }
+  when(traceInterrupt) {
+    printf(
+      "CXTRACE v=2 event=interrupt core=xiangshan hart=%d cycle=%d pc=0x%x cause=0x%x priv=%d\n",
+      io.hartId,
+      exceptionClkEnd,
+      debug_deqUop.debug_pc.getOrElse(0.U),
+      io.csr.traceCause,
+      io.csr.tracePriv
+    )
+  }
+
   for (i <- 0 until CommitWidth) {
     // defaults: state === s_idle and instructions commit
     // when intrBitSetReg, allow only one instruction to commit at each clock cycle
@@ -892,9 +967,18 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
       s"The walking entry($i) should be valid\n")
 
     val commitPerfDebugInfo = deqDebugInst.perfDebugInfo.getOrElse(0.U.asTypeOf(new PerfDebugInfo))
-    val commitClkStart = commitPerfDebugInfo.logRunStartTime
-    val commitClkEnd = timer
+    val commitStartValid = traceTokenValidEntries(deqPtrVec(i).value)
+    val commitClkStart = Mux(commitStartValid, traceStartCycleEntries(deqPtrVec(i).value), 0.U)
+    val commitClkEnd = timer + 1.U
+    val commitClkSpan = Mux(commitStartValid, commitClkEnd - commitClkStart + 1.U, 0.U)
+    val commitTraceToken = traceTokenEntries(deqPtrVec(i).value)
+    val priorCommitCount = if (i == 0) 0.U else PopCount(traceCommitValid.take(i))
+    val commitTermSeq = traceTermSeq + priorCommitCount
+    val commitInstretSeq = traceInstretSeq + priorCommitCount
     val commitLogRawInstr = deqDebugInst.debug_instr.getOrElse(0.U)
+    val commitInsnLen = Mux(commitLogRawInstr(1, 0) =/= 3.U, 2.U, 4.U)
+    val commitInsnForTrace = Mux(commitLogRawInstr(1, 0) =/= 3.U,
+      Cat(0.U(16.W), commitLogRawInstr(15, 0)), commitLogRawInstr)
     val commitLogInstr = commitLogRawInstr.asTypeOf(new XSInstBitFields)
     val commitIsFli =
       commitLogInstr.FUNCT7(6, 2) === "b11110".U &&
@@ -922,6 +1006,13 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
     val commitHasOtherIntWrite = commitIsScalarAmocasQLog && commitLogOtherPdest =/= 0.U
     val commitOtherLdest = io.commits.info(i).debug_ldest.getOrElse(0.U) + 1.U
 
+    assert(!traceCommitValid(i) || commitStartValid,
+      "CXTRACE architectural commit is missing ROB allocation metadata")
+    assert(!traceCommitValid(i) || (commitClkStart >= 1.U && commitClkEnd >= commitClkStart),
+      "CXTRACE architectural-commit cycle interval is invalid")
+    assert(!traceCommitValid(i) || instrSizeCommit(i) === 1.U,
+      "CXTRACE requires one architectural instruction per ROB commit record; disable ROB compression/fusion")
+
     if (!env.EnableDebug) {
       when(io.commits.isCommit && io.commits.commitValid(i)) {
         printf(
@@ -936,7 +1027,7 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
           vxsatDataRead(i),
           commitClkStart,
           commitClkEnd,
-          commitClkEnd - commitClkStart + 1.U
+          commitClkSpan
         )
         when (commitHasOtherIntWrite) {
           printf(
@@ -951,7 +1042,7 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
             vxsatDataRead(i),
             commitClkStart,
             commitClkEnd,
-            commitClkEnd - commitClkStart + 1.U
+            commitClkSpan
           )
         }
       }
@@ -968,8 +1059,29 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
       vxsatDataRead(i),
       commitClkStart,
       commitClkEnd,
-      commitClkEnd - commitClkStart + 1.U
+      commitClkSpan
     )
+    when(traceCommitValid(i)) {
+      printf(
+        "CXTRACE v=2 event=inst_terminal core=xiangshan hart=%d token=%d term_seq=%d instret_seq=%d commit_slot=%d pc=0x%x insn=0x%x insn_len=%d start_cycle=%d end_cycle=%d span=%d start_valid=%d start_kind=backend_alloc end_kind=arch_commit retired=1 trap=0 cause=none priv=%d issue_cycle_raw=%d run_cycle_raw=%d writeback_cycle_raw=%d\n",
+        io.hartId,
+        commitTraceToken,
+        commitTermSeq,
+        commitInstretSeq,
+        priorCommitCount,
+        robEntries(deqPtrVec(i).value).debug_pc.getOrElse(0.U),
+        commitInsnForTrace,
+        commitInsnLen,
+        commitClkStart,
+        commitClkEnd,
+        commitClkSpan,
+        commitStartValid,
+        io.csr.tracePriv,
+        commitPerfDebugInfo.issueTime,
+        commitPerfDebugInfo.logRunStartTime,
+        commitPerfDebugInfo.writebackTime
+      )
+    }
     XSInfo(io.commits.isCommit && io.commits.commitValid(i) && commitHasOtherIntWrite,
       "retired hart %d pc %x wen %d ldest %d pdest %x data %x fflags: %b vxsat: %b clk_start %d clk_end %d clk_span %d\n",
       io.hartId,
@@ -982,7 +1094,7 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
       vxsatDataRead(i),
       commitClkStart,
       commitClkEnd,
-      commitClkEnd - commitClkStart + 1.U
+      commitClkSpan
     )
     XSInfo(state === s_walk && io.commits.walkValid(i), "walked pc %x wen %d ldst %d data %x\n",
       robEntries(walkPtrVec(i).value).debug_pc.getOrElse(0.U),
@@ -1130,10 +1242,13 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
     ) || redirectAll)
     when(commitCond) {
       robEntries(i).valid := false.B
+      traceTokenValidEntries(i) := false.B
     }.elsewhen(enqOH.asUInt.orR && !io.redirect.valid) {
       robEntries(i).valid := true.B
+      traceTokenValidEntries(i) := true.B
     }.elsewhen(needFlush){
       robEntries(i).valid := false.B
+      traceTokenValidEntries(i) := false.B
     }
   }
 
