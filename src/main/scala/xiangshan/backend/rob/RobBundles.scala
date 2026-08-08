@@ -246,6 +246,12 @@ class RobCSRIO(implicit p: Parameters) extends XSBundle {
   val trapTarget = Input(new TargetPCBundle)
   val wfiEvent   = Input(Bool())
   val criticalErrorState = Input(Bool())
+  // Architectural privilege/cause sampled from the CSR trace interface.  The
+  // ROB owns CXTRACE terminal events, so keeping these values on the ROB side
+  // avoids inventing a fixed privilege mode or deriving a cause from an
+  // implementation-specific sparse exception vector.
+  val tracePriv  = Input(Priv())
+  val traceCause = Input(UInt(CauseWidth.W))
 
   val fflags     = Output(Valid(UInt(5.W)))
   val vxsat      = Output(Valid(Bool()))
