@@ -5,49 +5,60 @@ on:
     - cron: '33 15 * * *'
 
 jobs:
-  performance-test:
+  run:
+    name: Run Performance Test
     uses: ./.github/workflows/perf-template.yml
     with:
       test_branch: kunminghu-v3
-      perf_report_dir: /nfs/home/cirunner/perf-report-nightly
+      perf_report_dir: /nfs/home/cirunner/perf-report-custom
       benchmark_type: gcc15-spec06-0.3c
       servers: all
 
-  diff-report:
-    needs: performance-test
+  report:
+    name: Generate Report
+    needs: run
     runs-on: perf
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - name: Compute paths
+      - uses: actions/checkout@v7
+      - name: Link current report
         run: |
-          XS_CONFIG=CHIConfig
-          PERF_DIR=/nfs/home/cirunner/perf-report-nightly
-          # determine the most recent report directory for this config
-          SPEC_DIR=$(ls -td $PERF_DIR/cr*-${XS_CONFIG} 2>/dev/null | head -n1 || true)
-          if [ -n "$SPEC_DIR" ]; then
-            # extract date and short sha from dirname: cr<date>-<sha>-<config>
-            base=$(basename "$SPEC_DIR")
-            DATE=${base#cr}; DATE=${DATE%%-*}
-            SHORT_SHA=${base#cr${DATE}-}; SHORT_SHA=${SHORT_SHA%%-*}
+          if [ ! -L "${{ needs.run.outputs.PERF_DIR }}/nightly-${{ needs.run.outputs.DATE }}" ]; then
+            ln -s "${{ needs.run.outputs.SPEC_DIR }}" "${{ needs.run.outputs.PERF_DIR }}/nightly-${{ needs.run.outputs.DATE }}"
           else
-            DATE=$(date +%y%m%d)
-            SHORT_SHA="unknown"
+            echo "Symlink already exists"
           fi
-          echo "SPEC_DIR=$SPEC_DIR" >> $GITHUB_ENV
-          echo "PERF_DIR=$PERF_DIR" >> $GITHUB_ENV
-          echo "XS_CONFIG=$XS_CONFIG" >> $GITHUB_ENV
-          echo "DATE=$DATE" >> $GITHUB_ENV
-          echo "SHORT_SHA=$SHORT_SHA" >> $GITHUB_ENV
+      - name: Find previous commit
+        run: |
+          PREV_DIR=$(find "${{ needs.run.outputs.PERF_DIR }}" -maxdepth 1 -name "nightly-*" ! -name "nightly-${{ needs.run.outputs.DATE }}" | sort | tail -n1)
+          echo "Found previous report: $PREV_DIR"
+          PREV_DIR=$(readlink -f "$PREV_DIR" || true)
+          echo "Resolved to: $PREV_DIR"
+          echo "PREV_DIR=$PREV_DIR" >> $GITHUB_ENV
       - name: Diff with previous result
         run: |
           echo "### :bar_chart: Diff with previous run" >> $GITHUB_STEP_SUMMARY
-          PREV_DIR=$(ls -td $PERF_DIR/cr*-${XS_CONFIG} 2>/dev/null | grep -v "cr${DATE}-${SHORT_SHA}-${XS_CONFIG}" | head -n1 || true)
-          if [ -n "$PREV_DIR" ] && [ -f "$PREV_DIR/score.txt" ]; then
-            echo "Comparing with $PREV_DIR" >> $GITHUB_STEP_SUMMARY
-            python3 $GITHUB_WORKSPACE/.github/workflows/nightly_perf_diff.py "$SPEC_DIR/score.txt" "$PREV_DIR/score.txt" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "No previous score.txt found" >> $GITHUB_STEP_SUMMARY
+
+          CURR_SCORE_FILE="${{ needs.run.outputs.SCORE_FILE }}"
+          PREV_SCORE_FILE="$PREV_DIR/$(basename ${{ needs.run.outputs.SCORE_FILE }})"
+
+          if [ -z "${PREV_DIR}" ] || [ ! -d "${PREV_DIR}" ]; then
+            echo "${PREV_DIR} does not exist" >> $GITHUB_STEP_SUMMARY
+            exit 0
           fi
+
+          if [ ! -f "${PREV_SCORE_FILE}" ]; then
+            echo "${PREV_SCORE_FILE} not found, falling back"
+            PREV_SCORE_FILE_FALLBACK="$(find "${PREV_DIR}" -type f -name "score*.txt" | head -n1)"
+            if [ -z "${PREV_SCORE_FILE_FALLBACK}" ]; then
+              echo "No previous score file found, tried:" >> $GITHUB_STEP_SUMMARY
+              echo "- ${PREV_SCORE_FILE}" >> $GITHUB_STEP_SUMMARY
+              echo "- find score*.txt in ${PREV_DIR}" >> $GITHUB_STEP_SUMMARY
+              exit 0
+            fi
+            echo "${PREV_SCORE_FILE} not found, fall back to ${PREV_SCORE_FILE_FALLBACK}" >> $GITHUB_STEP_SUMMARY
+            PREV_SCORE_FILE="${PREV_SCORE_FILE_FALLBACK}"
+          fi
+
+          echo "Current: ${CURR_SCORE_FILE}" >> $GITHUB_STEP_SUMMARY
+          echo "Previous: ${PREV_SCORE_FILE}" >> $GITHUB_STEP_SUMMARY
+          python3 $GITHUB_WORKSPACE/.github/workflows/nightly_perf_diff.py "${CURR_SCORE_FILE}" "${PREV_SCORE_FILE}" >> $GITHUB_STEP_SUMMARY

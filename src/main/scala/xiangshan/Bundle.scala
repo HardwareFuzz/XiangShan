@@ -23,7 +23,7 @@ import chisel3.util.BitPat.bitPatToUInt
 import chisel3.util.experimental.decode.EspressoMinimizer
 
 import utility._
-import utils._
+import _root_.utils.{OptionWrapper, NamedUInt}
 
 import org.chipsalliance.cde.config.Parameters
 
@@ -95,7 +95,7 @@ class CtrlFlow(implicit p: Parameters) extends XSBundle {
   val instr = UInt(32.W)
   val pc = UInt(VAddrBits.W)
   val foldpc = UInt(MemPredPCWidth.W)
-  val exceptionVec = ExceptionVec()
+  val exceptionVec = ExceptSparseVec(ExceptionNO.fromFrontendSet)
   val backendException = Bool()
   val trigger = TriggerAction()
   val isRvc = Bool()
@@ -231,6 +231,12 @@ class Redirect(implicit p: Parameters) extends FrontendRedirect {
   val stFtqIdx = new FtqPtr // for load violation predict
   val stFtqOffset: UInt = UInt(FetchBlockInstOffsetWidth.W)
   val stIsRVC  = Bool()
+
+  def newFtqIdx: FtqPtr = Mux(
+    RedirectLevel.flushItself(level) && (ftqOffset === 0.U || ftqOffset === 1.U && !isRVC),
+    ftqIdx,
+    ftqIdx + 1.U
+  )
 
   val debug_runahead_checkpoint_id = UInt(64.W)
   val debugIsCtrl = Bool()
@@ -456,6 +462,7 @@ class FrontendToCtrlIO(implicit p: Parameters) extends XSBundle {
   // from backend
   val toFtq = Flipped(new CtrlToFtqIO)
   val canAccept = Input(Bool())
+  val backendEmpty = Input(Bool())
 
   val wfi = Flipped(new WfiReqBundle)
 }
@@ -521,11 +528,23 @@ class TlbMbmcBundle(implicit p: Parameters) extends MbmcStruct {
   }
 }
 
+class MmptStruct(implicit p: Parameters) extends XSBundle { // add new mpt csr 
+    val mode = UInt(4.W)
+    val sdid = UInt(6.W)
+    val optOutInNode = UInt(1.W) // skip intermediate node MPT check
+    val ppn  = UInt(44.W)
+}
+
+class TlbMmptBundle(implicit p: Parameters) extends MmptStruct {
+  val changed = Bool()
+}
+
 class TlbCsrBundle(implicit p: Parameters) extends XSBundle {
   val satp = new TlbSatpBundle()
   val vsatp = new TlbSatpBundle()
   val hgatp = new TlbHgatpBundle()
   val mbmc = new TlbMbmcBundle()
+  val mmpt = new TlbMmptBundle() // mpt csr
   val priv = new Bundle {
     val mxr = Bool()
     val sum = Bool()
@@ -536,6 +555,7 @@ class TlbCsrBundle(implicit p: Parameters) extends XSBundle {
     val spvp = UInt(1.W)
     val imode = UInt(2.W)
     val dmode = UInt(2.W)
+    val debug = Bool()
   }
   val mPBMTE = Bool()
   val hPBMTE = Bool()
@@ -559,16 +579,18 @@ class SfenceBundle(implicit p: Parameters) extends XSBundle {
     val rs1 = Bool()
     val rs2 = Bool()
     val addr = UInt(VAddrBits.W)
-    val id = UInt((AsidLength).W) // asid or vmid
+    val id = UInt((AsidLength).W) // asid or vmid or SDID
     val flushPipe = Bool()
     val hv = Bool()
     val hg = Bool()
+    val mfence = Option.when(HasMptCheck) (Bool())
   }
 
   override def toPrintable: Printable = {
     p"valid:0x${Hexadecimal(valid)} rs1:${bits.rs1} rs2:${bits.rs2} addr:${Hexadecimal(bits.addr)}, flushPipe:${bits.flushPipe}"
   }
 }
+
 
 // Bundle for load violation predictor updating
 class MemPredUpdateReq(implicit p: Parameters) extends XSBundle  {
@@ -582,6 +604,53 @@ class MemPredUpdateReq(implicit p: Parameters) extends XSBundle  {
   // by default, ldpc/stpc should be xor folded
   val ldpc = UInt(MemPredPCWidth.W)
   val stpc = UInt(MemPredPCWidth.W)
+}
+
+class StoreSetPredDBEntry(implicit p: Parameters) extends XSBundle {
+  val timeCnt = UInt(64.W)
+  val robIdx = UInt(log2Ceil(RobSize).W)
+  val foldPc = UInt(MemPredPCWidth.W)
+  val isStore = Bool()
+  val ssid = UInt(SSIDWidth.W)
+  val ssitStrict = Bool()
+  val lfstShouldWait = Bool()
+  val lfstNotIssuedStoreGt1 = Bool()
+  val finalLoadWaitBit = Bool()
+  val finalLoadWaitStrict = Bool()
+}
+
+class StoreSetTrainDBEntry(implicit p: Parameters) extends XSBundle {
+  val timeCnt = UInt(64.W)
+  val ldFoldPc = UInt(MemPredPCWidth.W)
+  val stFoldPc = UInt(MemPredPCWidth.W)
+}
+
+class StoreSetUpdateDBEntry(implicit p: Parameters) extends XSBundle {
+  val timeCnt = UInt(64.W)
+  val ldFoldPc = UInt(MemPredPCWidth.W)
+  val stFoldPc = UInt(MemPredPCWidth.W)
+  val loadOldSSID = UInt(SSIDWidth.W)
+  val storeOldSSID = UInt(SSIDWidth.W)
+  val loadOldStrict = Bool()
+  val winnerSSID = UInt(SSIDWidth.W)
+  val newLoadSSID = UInt(SSIDWidth.W)
+  val newLoadStrict = Bool()
+  val updateType = UInt(3.W)
+}
+
+class StoreSetLoadUnitCheckDBEntry(implicit p: Parameters) extends XSBundle {
+  val timeCnt = UInt(64.W)
+  val robIdx = UInt(log2Ceil(RobSize).W)
+  val foldPc = UInt(MemPredPCWidth.W)
+  val ssid = UInt(SSIDWidth.W)
+  val loadSqIdx = UInt(log2Ceil(StoreQueueSize).W)
+  val storeSqIdx = UInt(log2Ceil(StoreQueueSize).W)
+  val loadWaitBit = Bool()
+  val loadWaitStrict = Bool()
+  val mdpAddrValid = Bool()
+  val mdpAddrStrict = Bool()
+  val mdpAddrHit = Bool()
+  val storeSqIdxValid = Bool()
 }
 
 class CustomCSRCtrlIO(implicit p: Parameters) extends XSBundle {
@@ -781,7 +850,6 @@ class MatchTriggerIO(implicit p: Parameters) extends XSBundle {
 
 class StallReasonIO(width: Int) extends Bundle {
   val reason = Output(Vec(width, UInt(log2Ceil(TopDownCounters.NumStallReasons.id).W)))
-  val backReason = Flipped(Valid(UInt(log2Ceil(TopDownCounters.NumStallReasons.id).W)))
 }
 
 // custom l2 - l1 interface
@@ -811,8 +879,8 @@ class UopTopDown(implicit p: Parameters) extends XSBundle {
 
 class LowPowerIO(implicit p: Parameters) extends Bundle {
   /* i_*: SoC -> CPU   o_*: CPU -> SoC */
-  val o_cpu_no_op = Output(Bool()) 
-  //physical power down 
+  val o_cpu_no_op = Output(Bool())
+  //physical power down
   val i_cpu_pwrdown_req_n = Input(Bool())
   val o_cpu_pwrdown_ack_n = Output(Bool())
   // power on/off sequence control for Core iso/rst

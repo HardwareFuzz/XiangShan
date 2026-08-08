@@ -25,7 +25,7 @@ import freechips.rocketchip.interrupts._
 import freechips.rocketchip.tilelink._
 import freechips.rocketchip.util._
 import system.HasSoCParameter
-import coupledL2.tl2chi.{AsyncPortIO, CHIAsyncBridgeSource, PortIO}
+import xscache.chi.{AsyncPortIO, CHIAsyncBridgeSource, PortIO}
 import utility.sram.SramBroadcastBundle
 import utility.{DFTResetSignals, IntBuffer, ResetGen}
 import xiangshan.backend.trace.TraceCoreInterface
@@ -77,7 +77,7 @@ class XSTileWrap()(implicit p: Parameters) extends LazyModule
       val teemsiInfo = Option.when(soc.IMSICParams.HasTEEIMSIC)(Input(ValidIO(UInt(soc.IMSICParams.MSI_INFO_WIDTH.W))))
       val teemsiAck = Option.when(soc.IMSICParams.HasTEEIMSIC)(Output(Bool()))
       val reset_vector = Input(UInt(PAddrBits.W))
-      val cpu_halt = Output(Bool())
+      val cpu_wfi = Output(Bool())
       val cpu_crtical_error = Output(Bool())
       val hartResetReq = Input(Bool())
       val hartIsInReset = Output(Bool())
@@ -144,7 +144,7 @@ class XSTileWrap()(implicit p: Parameters) extends LazyModule
     tile.module.io.reset_vector := io.reset_vector
     tile.module.io.dft.zip(io.dft).foreach({ case (a, b) => a := b })
     tile.module.io.dft_reset.zip(io.dft_reset).foreach({ case (a, b) => a := b })
-    io.cpu_halt := tile.module.io.cpu_halt
+    io.cpu_wfi := tile.module.io.cpu_wfi
     io.cpu_crtical_error := tile.module.io.cpu_crtical_error
     io.msiAck := tile.module.io.msiAck
     io.teemsiAck zip tile.module.io.teemsiAck foreach { case (io_teemsiAck, tile_teemsiAck) =>

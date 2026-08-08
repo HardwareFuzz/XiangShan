@@ -29,6 +29,15 @@ class DcacheStoreRequestIO(implicit p: Parameters) extends DCacheBundle {
   val instrtype   = UInt(sourceTypeWidth.W)
 }
 
+class DcacheStoreRespIO(implicit p: Parameters) extends DCacheBundle {
+  // this store misses (for now, not used)
+  val miss = Bool()
+  // this store needs replay (for now, not used)
+  val replay = Bool()
+  // tag error TODO: add logic
+  val tag_error = Bool()
+}
+
 class DCacheStoreIO(implicit p: Parameters) extends DCacheBundle {
   // Paddr in STA s1, used for hit check
   val s1_paddr = Output(UInt(PAddrBits.W))
@@ -40,14 +49,7 @@ class DCacheStoreIO(implicit p: Parameters) extends DCacheBundle {
   val s2_pc = Output(UInt(VAddrBits.W))
 
   val req = DecoupledIO(new DcacheStoreRequestIO)
-  val resp = Flipped(DecoupledIO(new DCacheBundle() {
-    // this store misses (for now, not used)
-    val miss = Bool()
-    // this store needs replay (for now, not used)
-    val replay = Bool()
-    // tag error TODO: add logic
-    val tag_error = Bool()
-  }))
+  val resp = Flipped(DecoupledIO(new DcacheStoreRespIO()))
 }
 /** Non-Blocking Store Dcache Pipeline
   *
@@ -93,11 +95,11 @@ class StorePipe(id: Int)(implicit p: Parameters) extends DCacheModule{
   val s0_fire = io.lsu.req.fire
 
   io.meta_read.valid        := s0_valid
-  io.meta_read.bits.idx     := get_idx(io.lsu.req.bits.vaddr)
+  io.meta_read.bits.idx     := get_dcache_idx(io.lsu.req.bits.vaddr)
   io.meta_read.bits.way_en  := ~0.U(nWays.W)
 
   io.tag_read.valid         := s0_valid
-  io.tag_read.bits.idx      := get_idx(io.lsu.req.bits.vaddr)
+  io.tag_read.bits.idx      := get_dcache_idx(io.lsu.req.bits.vaddr)
   io.tag_read.bits.way_en   := ~0.U(nWays.W)
 
   io.lsu.req.ready := io.meta_read.ready && io.tag_read.ready
@@ -137,7 +139,7 @@ class StorePipe(id: Int)(implicit p: Parameters) extends DCacheModule{
     * Don't choose a replace_way anymore
     */
   io.replace_way.set.valid := false.B
-  io.replace_way.set.bits  := get_idx(s1_req.vaddr)
+  io.replace_way.set.bits  := get_dcache_idx(s1_req.vaddr)
   io.replace_way.dmWay     := get_direct_map_way(s1_req.vaddr)
 
   val s1_need_replacement = !s1_tag_match.orR

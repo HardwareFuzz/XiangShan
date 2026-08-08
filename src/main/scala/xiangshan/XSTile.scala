@@ -28,8 +28,7 @@ import system.HasSoCParameter
 import top.{ArgParser, BusPerfMonitor, Generator}
 import utility._
 import utility.sram.SramBroadcastBundle
-import coupledL2.EnableCHI
-import coupledL2.tl2chi.PortIO
+import xscache.chi.PortIO
 import xiangshan.backend.trace.TraceCoreInterface
 
 class XSTile()(implicit p: Parameters) extends LazyModule
@@ -43,7 +42,6 @@ class XSTile()(implicit p: Parameters) extends LazyModule
   val enableL2 = coreParams.L2CacheParamsOpt.isDefined
   // =========== Public Ports ============
   val memBlock = core.memBlock.inner
-  val core_l3_pf_port = memBlock.l3_pf_sender_opt
   val memory_port = if (enableCHI && enableL2) None else Some(l2top.inner.memory_port.get)
   val tl_uncache = l2top.inner.mmio_port
   val sep_tl_opt = l2top.inner.sep_tl_port_opt
@@ -61,9 +59,12 @@ class XSTile()(implicit p: Parameters) extends LazyModule
 
   // =========== Components' Connection ============
   // L1 to l1_xbar
-  coreParams.dcacheParametersOpt.map { _ =>
-    l2top.inner.misc_l2_pmu := l2top.inner.l1d_logger := memBlock.dcache_port :=
-      memBlock.l1d_to_l2_buffer.node := memBlock.dcache.clientNode
+  coreParams.dcacheParametersOpt.map { params =>
+    val clientNodes = memBlock.dcache.clientNodes
+    (memBlock.dcache_port zip memBlock.l1d_to_l2_buffer zip clientNodes).zipWithIndex.foreach {
+      case (((port, buffer), clientNode), i) =>
+        l2top.inner.misc_l2_pmu := l2top.inner.l1d_logger(i) := port := buffer.node := clientNode
+    }
   }
 
   l2top.inner.misc_l2_pmu := l2top.inner.l1i_logger := memBlock.frontendBridge.icache_node
@@ -106,7 +107,7 @@ class XSTile()(implicit p: Parameters) extends LazyModule
       val teemsiInfo = Option.when(soc.IMSICParams.HasTEEIMSIC)(Input(ValidIO(UInt(soc.IMSICParams.MSI_INFO_WIDTH.W))))
       val teemsiAck = Option.when(soc.IMSICParams.HasTEEIMSIC)(Output(Bool()))
       val reset_vector = Input(UInt(PAddrBits.W))
-      val cpu_halt = Output(Bool())
+      val cpu_wfi = Output(Bool())
       val cpu_crtical_error = Output(Bool())
       val hartIsInReset = Output(Bool())
       val traceCoreInterface = new TraceCoreInterface
@@ -145,8 +146,8 @@ class XSTile()(implicit p: Parameters) extends LazyModule
     core.module.io.clintTime := l2top.module.io.clintTime.toCore
     l2top.module.io.clintTime.fromTile := io.clintTime
     l2top.module.io.reset_vector.fromTile := io.reset_vector
-    l2top.module.io.cpu_halt.fromCore := core.module.io.cpu_halt
-    io.cpu_halt := l2top.module.io.cpu_halt.toTile
+    l2top.module.io.cpu_wfi.fromCore := core.module.io.cpu_wfi
+    io.cpu_wfi := l2top.module.io.cpu_wfi.toTile
     l2top.module.io.cpu_critical_error.fromCore := core.module.io.cpu_critical_error
     io.cpu_crtical_error := l2top.module.io.cpu_critical_error.toTile
     l2top.module.io.msiAck.fromCore := core.module.io.msiAck
@@ -182,9 +183,7 @@ class XSTile()(implicit p: Parameters) extends LazyModule
       l2top.module.io.pfCtrlFromCore := core.module.io.l2PfCtrl
 
       l2top.module.io.beu_errors.l2 <> 0.U.asTypeOf(l2top.module.io.beu_errors.l2)
-      core.module.io.l2_hint.bits.sourceId := l2top.module.io.l2_hint.bits.sourceId
-      core.module.io.l2_hint.bits.isKeyword := l2top.module.io.l2_hint.bits.isKeyword
-      core.module.io.l2_hint.valid := l2top.module.io.l2_hint.valid
+      core.module.io.l2_hint <> l2top.module.io.l2_hint
 
       core.module.io.l2PfqBusy := false.B
       core.module.io.debugTopDown.l2MissMatch := l2top.module.io.debugTopDown.l2MissMatch
@@ -198,9 +197,7 @@ class XSTile()(implicit p: Parameters) extends LazyModule
     } else {
 
       l2top.module.io.beu_errors.l2 <> 0.U.asTypeOf(l2top.module.io.beu_errors.l2)
-      core.module.io.l2_hint.bits.sourceId := l2top.module.io.l2_hint.bits.sourceId
-      core.module.io.l2_hint.bits.isKeyword := l2top.module.io.l2_hint.bits.isKeyword
-      core.module.io.l2_hint.valid := l2top.module.io.l2_hint.valid
+      core.module.io.l2_hint <> l2top.module.io.l2_hint
 
       core.module.io.l2PfqBusy := false.B
       core.module.io.debugTopDown.l2MissMatch := false.B

@@ -24,6 +24,7 @@ import xiangshan.frontend.bpu.BasePredictor
 import xiangshan.frontend.bpu.BasePredictorIO
 import xiangshan.frontend.bpu.HasFastTrainIO
 import xiangshan.frontend.bpu.Prediction
+import xiangshan.frontend.bpu.history.phr.PhrAllFoldedHistories
 
 /**
  * This module is the implementation of the ahead BTB (Branch Target Buffer).
@@ -33,11 +34,13 @@ class AheadBtb(implicit p: Parameters) extends BasePredictor with Helpers {
     val redirectValid: Bool                       = Input(Bool())
     val overrideValid: Bool                       = Input(Bool())
     val prediction:    Vec[Valid[Prediction]]     = Output(Vec(NumAheadBtbPredictionEntries, Valid(new Prediction)))
+    val predCtrl:      AbtbBranchCtrl             = Output(new AbtbBranchCtrl)
     val abtbResult:    Vec[Valid[AheadBtbResult]] = Output(Vec(NumAheadBtbPredictionEntries, Valid(new AheadBtbResult)))
     val abtbResultPos: Vec[UInt]                  = Output(Vec(NumAheadBtbPredictionEntries, UInt(CfiPositionWidth.W)))
     val abtbPos:       Vec[UInt]                  = Output(Vec(NumAheadBtbPredictionEntries, UInt(CfiPositionWidth.W)))
     val meta:          AheadBtbMeta               = Output(new AheadBtbMeta)
     val debug_startPc: PrunedAddr                 = Output(PrunedAddr(VAddrBits))
+    val normalPathHist: PhrAllFoldedHistories = Input(new PhrAllFoldedHistories(AllFoldedHistoryInfo))
   }
   val io: AheadBtbIO = IO(new AheadBtbIO)
 
@@ -49,11 +52,7 @@ class AheadBtb(implicit p: Parameters) extends BasePredictor with Helpers {
   private val banks     = Seq.tabulate(NumBanks)(i => Module(new AheadBtbBank(i)))
   private val replacers = Seq.fill(NumBanks)(Module(new AheadBtbReplacer))
 
-  private val resetDone = RegInit(false.B)
-  when(banks.map(_.io.readReq.ready).reduce(_ && _)) {
-    resetDone := true.B
-  }
-  io.resetDone := resetDone
+  io.sramResetDone := banks.map(_.io.sramResetDone).reduce(_ && _)
 
   io.trainReady := true.B
 
@@ -109,9 +108,11 @@ class AheadBtb(implicit p: Parameters) extends BasePredictor with Helpers {
 
   private val s0_previousStartPc = io.startPc
 
-  private val s0_setIdx   = getSetIndex(s0_previousStartPc)
-  private val s0_bankIdx  = getBankIndex(s0_previousStartPc)
-  private val s0_bankMask = UIntToOH(s0_bankIdx)
+  private val s0_simpleHash = io.normalPathHist.getHistWithInfo(AbtbHashFhInfo).foldedHist(AheadBtbHashBitWidth - 1, 0)
+  private val s0_hashIndex  = s0_previousStartPc(log2Ceil(NumEntries / NumWays) - 1, 0) ^ s0_simpleHash
+  private val s0_setIdx     = s0_hashIndex(log2Ceil(NumEntries / NumWays) - 1, log2Ceil(NumBanks))
+  private val s0_bankIdx    = s0_hashIndex(log2Ceil(NumBanks) - 1, 0)
+  private val s0_bankMask   = UIntToOH(s0_bankIdx)
 
   banks.zipWithIndex.foreach { case (b, i) =>
     b.io.readReq.valid       := predictReqValid && s0_bankMask(i)
@@ -130,8 +131,10 @@ class AheadBtb(implicit p: Parameters) extends BasePredictor with Helpers {
   private val s1_bankIdx  = RegEnable(s0_bankIdx, s0_fire)
   private val s1_bankMask = RegEnable(s0_bankMask, s0_fire)
 
-  private val s1_entries = Mux1H(s1_bankMask, banks.map(_.io.readResp.entries))
-
+  private val s1_entries    = Mux1H(s1_bankMask, banks.map(_.io.readResp.entries))
+  private val s1_ctrVec     = takenCounter(s1_bankIdx)(s1_setIdx)
+  private val s1_ctrResult  = VecInit(s1_ctrVec.map(_.isPositive))
+  private val s1_strongBias = VecInit(s1_ctrVec.map(_.isSaturate))
   /* --------------------------------------------------------------------------------------------------------------
      predict pipeline stage 2 / 3
      - get taken counter result
@@ -142,37 +145,58 @@ class AheadBtb(implicit p: Parameters) extends BasePredictor with Helpers {
      - stage 3 is only for fast prediction when override is valid
      -------------------------------------------------------------------------------------------------------------- */
 
-  private val s3_setIdx   = RegInit(0.U.asTypeOf(s1_setIdx))
-  private val s3_bankIdx  = RegInit(0.U.asTypeOf(s1_bankIdx))
-  private val s3_bankMask = RegInit(0.U.asTypeOf(s1_bankMask))
-  private val s3_entries  = RegInit(0.U.asTypeOf(s1_entries))
-  private val s3_startPc  = RegInit(0.U.asTypeOf(s1_startPc))
+  private val s3_setIdx     = RegInit(0.U.asTypeOf(s1_setIdx))
+  private val s3_bankIdx    = RegInit(0.U.asTypeOf(s1_bankIdx))
+  private val s3_bankMask   = RegInit(0.U.asTypeOf(s1_bankMask))
+  private val s3_entries    = RegInit(0.U.asTypeOf(s1_entries))
+  private val s3_startPc    = RegInit(0.U.asTypeOf(s1_startPc))
+  private val s3_ctrResult  = RegInit(VecInit.fill(NumWays)(false.B))
+  private val s3_strongBias = RegInit(VecInit.fill(NumWays)(false.B))
 
   private val s1_realEntries = Mux(overrideValid, s3_entries, s1_entries)
+  private val s1_tag         = getTag(s1_startPc)
+  private val s1_realHitMask = VecInit(s1_realEntries.map(entry => entry.valid && entry.tag === s1_tag))
   private val s2_setIdx      = RegEnable(Mux(overrideValid, s3_setIdx, s1_setIdx), s1_fire)
   private val s2_bankIdx     = RegEnable(Mux(overrideValid, s3_bankIdx, s1_bankIdx), s1_fire)
   private val s2_bankMask    = RegEnable(Mux(overrideValid, s3_bankMask, s1_bankMask), s1_fire)
+  private val s2_ctrResult   = RegEnable(Mux(overrideValid, s3_ctrResult, s1_ctrResult), s1_fire)
+  private val s2_strongBias  = RegEnable(Mux(overrideValid, s3_strongBias, s1_strongBias), s1_fire)
   private val s2_entries     = RegEnable(s1_realEntries, s1_fire)
   private val s2_startPc     = RegEnable(s1_startPc, s1_fire)
+  private val s2_hitMask     = RegEnable(s1_realHitMask, s1_fire)
 
   when(s2_fire) {
-    s3_setIdx   := s2_setIdx
-    s3_bankIdx  := s2_bankIdx
-    s3_bankMask := s2_bankMask
-    s3_entries  := s2_entries
-    s3_startPc  := s2_startPc
+    s3_setIdx     := s2_setIdx
+    s3_bankIdx    := s2_bankIdx
+    s3_bankMask   := s2_bankMask
+    s3_entries    := s2_entries
+    s3_startPc    := s2_startPc
+    s3_ctrResult  := s2_ctrResult
+    s3_strongBias := s2_strongBias
   }
 
-  private val s2_ctrResult  = takenCounter(s2_bankIdx)(s2_setIdx).map(_.isPositive)
-  private val s2_strongBias = takenCounter(s2_bankIdx)(s2_setIdx).map(_.isSaturate)
-
-  private val s2_tag = getTag(s2_startPc)
-  dontTouch(s2_tag)
-  private val s2_hitMask = s2_entries.map(entry => entry.valid && entry.tag === s2_tag)
-  private val s2_hit     = s2_hitMask.reduce(_ || _)
+  // private val s2_tag = getTag(s2_startPc)
+  // dontTouch(s2_tag)
+  // private val s2_hitMask = s2_entries.map(entry => entry.valid && entry.tag === s2_tag)
+  // private val s2_hit     = s2_hitMask.reduce(_ || _)
+  private val s2_hit = s2_hitMask.reduce(_ || _)
 
   // When detect multi-hit, we need to invalidate one entry.
   private val (s2_multiHit, s2_multiHitWayIdx) = detectMultiHit(s2_hitMask, s2_entries.map(_.position))
+
+  private val s2_jumpValidVec      = RegInit(VecInit.fill(NumAheadBtbPredictionEntries)(false.B))
+  private val s2_conditionValidVec = RegInit(VecInit.fill(NumAheadBtbPredictionEntries)(false.B))
+  when(s1_fire) {
+    s2_jumpValidVec := VecInit.tabulate(NumAheadBtbPredictionEntries) {
+      i => (s1_realEntries(i).attribute.isDirect || s1_realEntries(i).attribute.isIndirect) && s1_realHitMask(i)
+    }
+    s2_conditionValidVec := VecInit.tabulate(NumAheadBtbPredictionEntries) {
+      i => s1_realEntries(i).attribute.isConditional && s1_realHitMask(i)
+    }
+  }.elsewhen(s2_flush || s2_fire) {
+    s2_jumpValidVec      := VecInit.fill(NumAheadBtbPredictionEntries)(false.B)
+    s2_conditionValidVec := VecInit.fill(NumAheadBtbPredictionEntries)(false.B)
+  }
 
   io.prediction.zipWithIndex.foreach { case (pred, i) =>
     pred.valid            := s2_valid && s2_hitMask(i)
@@ -181,6 +205,9 @@ class AheadBtb(implicit p: Parameters) extends BasePredictor with Helpers {
     pred.bits.attribute   := s2_entries(i).attribute
     pred.bits.target      := getFullTarget(s2_startPc, s2_entries(i).targetLowerBits, s2_entries(i).targetCarry)
   }
+  // Advance the calculation of critical control signals.
+  io.predCtrl.jumpValidVec      := s2_jumpValidVec
+  io.predCtrl.conditionValidVec := s2_conditionValidVec
   io.abtbResult.zipWithIndex.foreach { case (pred, i) =>
     pred.valid             := s2_valid && s2_hitMask(i)
     pred.bits.taken        := s2_ctrResult(i)
@@ -223,7 +250,7 @@ class AheadBtb(implicit p: Parameters) extends BasePredictor with Helpers {
 
   private val t0_train = io.fastTrain.get.bits
 
-  private val t0_fire = io.enable && io.fastTrain.get.valid && t0_train.finalPrediction.taken && t0_train.abtbMeta.valid
+  private val t0_fire = io.enable && io.fastTrain.get.valid && t0_train.abtbMeta.valid
 
   /* --------------------------------------------------------------------------------------------------------------
      train pipeline stage 1
@@ -240,7 +267,8 @@ class AheadBtb(implicit p: Parameters) extends BasePredictor with Helpers {
   private val t1_setMask  = UIntToOH(t1_setIdx)
   private val t1_bankMask = t1_meta.bankMask
 
-  // use taken branch of s3 prediction to train abtb
+  // A taken final prediction can allocate/correct an entry. A not-taken
+  // prediction only updates counters of the conditional entries that hit.
   private val t1_trainTaken           = t1_train.finalPrediction.taken
   private val t1_trainPosition        = t1_train.finalPrediction.cfiPosition
   private val t1_trainAttribute       = t1_train.finalPrediction.attribute
@@ -264,6 +292,8 @@ class AheadBtb(implicit p: Parameters) extends BasePredictor with Helpers {
         val needDecrease = updateThisSet && isCond && (!t1_trainTaken || t1_trainTaken && posBefore)
         val needIncrease = updateThisSet && isCond && t1_trainTaken && posEqual
 
+        // For timing purposes, the indirect jump branch in the abtb comparison matrix relies on
+        // the default CTR assignment and omits extra attribute checks.
         when(needReset)(ctr.resetWeakPositive())
           .elsewhen(needDecrease)(ctr.selfDecrease())
           .elsewhen(needIncrease)(ctr.selfIncrease())
@@ -276,7 +306,7 @@ class AheadBtb(implicit p: Parameters) extends BasePredictor with Helpers {
     e.hit && e.position === t1_trainPosition && e.attribute === t1_trainAttribute
   }
   private val t1_hit               = t1_hitMask.reduce(_ || _)
-  private val t1_needWriteNewEntry = !t1_hit
+  private val t1_needWriteNewEntry = !t1_hit && t1_trainTaken
 
   // If the target of indirect branch is wrong, we need correct it.
   // Since the entry only stores the lower bits of the target, we only need to check the lower bits.
@@ -298,19 +328,28 @@ class AheadBtb(implicit p: Parameters) extends BasePredictor with Helpers {
   replacers.foreach(_.io.replaceSetIdx := t1_setIdx)
   private val victimWayIdx = replacers.map(_.io.victimWayIdx)
 
+  private val t2_fire              = RegNext(t1_fire, init = false.B)
+  private val t2_victimWayIdx      = RegNext(VecInit(victimWayIdx))
+  private val t2_setIdx            = RegNext(t1_setIdx)
+  private val t2_bankMask          = RegNext(t1_bankMask)
+  private val t2_hitMaskOH         = RegNext(VecInit(t1_hitMaskOH))
+  private val t2_needWriteNewEntry = RegNext(t1_needWriteNewEntry)
+  private val t2_needCorrectTarget = RegNext(t1_needCorrectTarget)
+  private val t2_writeEntry        = RegNext(t1_writeEntry)
+
   banks.zipWithIndex.foreach { case (b, i) =>
-    when(t1_fire && t1_needWriteNewEntry && t1_bankMask(i)) {
+    when(t2_fire && t2_needWriteNewEntry && t2_bankMask(i)) {
       b.io.writeReq.valid             := true.B
       b.io.writeReq.bits.needResetCtr := true.B
-      b.io.writeReq.bits.setIdx       := t1_setIdx
-      b.io.writeReq.bits.wayIdx       := victimWayIdx(i)
-      b.io.writeReq.bits.entry        := t1_writeEntry
-    }.elsewhen(t1_fire && t1_needCorrectTarget && t1_bankMask(i)) {
+      b.io.writeReq.bits.setIdx       := t2_setIdx
+      b.io.writeReq.bits.wayIdx       := t2_victimWayIdx(i)
+      b.io.writeReq.bits.entry        := t2_writeEntry
+    }.elsewhen(t2_fire && t2_needCorrectTarget && t2_bankMask(i)) {
       b.io.writeReq.valid             := true.B
       b.io.writeReq.bits.needResetCtr := false.B
-      b.io.writeReq.bits.setIdx       := t1_setIdx
-      b.io.writeReq.bits.wayIdx       := OHToUInt(t1_hitMaskOH)
-      b.io.writeReq.bits.entry        := t1_writeEntry
+      b.io.writeReq.bits.setIdx       := t2_setIdx
+      b.io.writeReq.bits.wayIdx       := OHToUInt(t2_hitMaskOH)
+      b.io.writeReq.bits.entry        := t2_writeEntry
     }.elsewhen(s2_valid && s2_multiHit && s2_bankMask(i)) {
       b.io.writeReq.valid             := true.B
       b.io.writeReq.bits.needResetCtr := true.B

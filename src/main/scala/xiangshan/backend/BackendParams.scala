@@ -117,6 +117,9 @@ case class BackendParams(
   def CsrCnt = allSchdParams.map(_.CsrCnt).sum
   def IqCnt = allSchdParams.map(_.issueBlockParams.length).sum
 
+  def hasLoadSchd = LdExuCnt > 0
+  def hasStoreSchd = StaExuCnt > 0
+
   def numPcMemReadPort = allExuParams.filter(_.needPc).size
   def numTargetReadPort = allRealExuParams.count(x => x.needTarget)
 
@@ -385,6 +388,8 @@ case class BackendParams(
     this.allExuParams.filter(x => x.isMemExeUnit && x.readIntRf).map(_.numIntSrc).reduce(_ + _)
   }
 
+  def getExuRCReadSize = getIntExuRCReadSize + getMemExuRCReadSize
+
   /**
     * Get size of write ports of int regcache
     */
@@ -395,6 +400,8 @@ case class BackendParams(
   def getMemExuRCWriteSize = {
     this.allExuParams.filter(x => x.hasLoadExu && x.isIQWakeUpSource && x.readIntRf).size
   }
+
+  def getExuRCWriteSize = getIntExuRCWriteSize + getMemExuRCWriteSize
 
   def getExuIdx(name: String): Int = {
     val exuParams = allRealExuParams
@@ -440,6 +447,9 @@ case class BackendParams(
   def getVfWBExeGroup : Map[Int, Seq[ExeUnitParams]] = allRealExuParams.filter(_.getVfWBPort .nonEmpty).groupBy(_.getVfWBPort.get.port)
   def getV0WBExeGroup : Map[Int, Seq[ExeUnitParams]] = allRealExuParams.filter(_.getV0WBPort .nonEmpty).groupBy(_.getV0WBPort.get.port)
   def getVlWBExeGroup : Map[Int, Seq[ExeUnitParams]] = allRealExuParams.filter(_.getVlWBPort .nonEmpty).groupBy(_.getVlWBPort.get.port)
+
+  def exceptionOut = allExuParams.flatMap(_.exceptionOut).distinct.sorted
+  def getExceptionOutList = allRealExuParams.map(_.exceptionOut).filter(_.nonEmpty)
 
   private def isContinuous(portIndices: Seq[Int]): Boolean = {
     val portIndicesSet = portIndices.toSet

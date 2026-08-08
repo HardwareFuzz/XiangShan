@@ -13,7 +13,8 @@ on:
         default: kunminghu-v3
 
 jobs:
-  performance-test:
+  run:
+    name: Run Performance Test
     uses: ./.github/workflows/perf-template.yml
     with:
       test_branch: ${{ github.event.inputs.test_branch }}
