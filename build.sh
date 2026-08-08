@@ -170,6 +170,16 @@ case "$COV_MODE" in
   light) target="emu-cov-light" ;;
 esac
 
+SIM_ARGS_BUILD="${SIM_ARGS:-}"
+# Provider bins rely on compact difftest commit trace plus explicit retire/store/trap prints,
+# so keep the noisy global debug stream disabled unless the caller explicitly opts in.
+for required_arg in --disable-perf --disable-alwaysdb; do
+  case " ${SIM_ARGS_BUILD} " in
+    *" ${required_arg} "*) ;;
+    *) SIM_ARGS_BUILD="${SIM_ARGS_BUILD:+$SIM_ARGS_BUILD }${required_arg}" ;;
+  esac
+done
+
 build_meta=$(cat <<EOF
 ISA=${ISA}
 CORES=${CORES}
@@ -179,6 +189,7 @@ CONFIG=${CONFIG}
 TAG=${TAG}
 COV_MODE=${COV_MODE}
 TARGET=${target}
+SIM_ARGS=${SIM_ARGS_BUILD}
 EOF
 )
 
@@ -195,6 +206,7 @@ echo "  CONFIG=$CONFIG"
 echo "  NUM_CORES=$CORES"
 echo "  RTL_SUFFIX=$RTL_SUFFIX"
 echo "  target=$target"
+echo "  sim_args=$SIM_ARGS_BUILD"
 
 "$MAKE_CMD" -C "$ROOT_DIR" -j"$MAKE_JOBS" \
   BUILD_DIR="$workdir" \
@@ -202,6 +214,7 @@ echo "  target=$target"
   NUM_CORES="$CORES" \
   RTL_SUFFIX="$RTL_SUFFIX" \
   EMU_BUILD_JOBS="$MAKE_JOBS" \
+  SIM_ARGS="$SIM_ARGS_BUILD" \
   "$target"
 
 bin_path="$workdir/$emu_name"
