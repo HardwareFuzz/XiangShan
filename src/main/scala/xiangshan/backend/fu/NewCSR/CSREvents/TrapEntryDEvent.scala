@@ -4,8 +4,6 @@ import chisel3._
 import chisel3.util._
 import org.chipsalliance.cde.config.Parameters
 import utility.{SignExt, ZeroExt, GatedValidRegNext}
-import xiangshan.{ExceptionNO, HasXSParameter, TriggerAction}
-import xiangshan.ExceptionNO._
 import xiangshan.backend.fu.NewCSR
 import xiangshan.backend.fu.NewCSR.CSRBundles.{CauseBundle, OneFieldBundle, PrivState}
 import xiangshan.backend.fu.NewCSR.CSRConfig.{VaddrMaxWidth, XLEN}
@@ -30,6 +28,7 @@ class TrapEntryDEventInput(implicit override val p: Parameters) extends TrapEntr
   val hasSingleStep                = Input(Bool())
   val breakPoint                   = Input(Bool())
   val criticalErrorStateEnterDebug = Input(Bool())
+  val holdDpc                      = Input(Bool())
 }
 
 class TrapEntryDEventModule(implicit val p: Parameters) extends Module with CSREventBase with DebugMMIO {
@@ -53,9 +52,9 @@ class TrapEntryDEventModule(implicit val p: Parameters) extends Module with CSRE
   private val isFetchMalAddr               = in.isFetchMalAddr
 
   private val hasExceptionInDmode = debugMode && hasTrap
-  val causeIntr = DcsrCause.Haltreq.asUInt
-  val causeExp = MuxCase(DcsrCause.None.asUInt, Seq(
+  val cause = MuxCase(DcsrCause.None.asUInt, Seq(
     criticalErrorStateEnterDebug -> DcsrCause.Other.asUInt,
+    hasDebugIntr                 -> DcsrCause.Haltreq.asUInt,
     triggerEnterDebugMode        -> DcsrCause.Trigger.asUInt,
     hasDebugEbreakException      -> DcsrCause.Ebreak.asUInt,
     hasSingleStep                -> DcsrCause.Step.asUInt
@@ -79,7 +78,7 @@ class TrapEntryDEventModule(implicit val p: Parameters) extends Module with CSRE
   out := DontCare
   // output
   out.dcsr.valid              := valid
-  out.dpc.valid               := valid
+  out.dpc.valid               := valid && !in.holdDpc
   // !debugMode trap || debugMode hasExp
   out.targetPc.valid          := RegNext(valid || hasExceptionInDmode)
   out.debugMode.valid         := valid
@@ -88,7 +87,7 @@ class TrapEntryDEventModule(implicit val p: Parameters) extends Module with CSRE
 
   out.dcsr.bits.V             := current.privState.V.asUInt
   out.dcsr.bits.PRV           := current.privState.PRVM.asUInt
-  out.dcsr.bits.CAUSE         := Mux(hasDebugIntr, causeIntr, causeExp)
+  out.dcsr.bits.CAUSE         := cause
   out.dpc.bits.epc            := Mux(isFetchMalAddr, in.fetchMalTval(63, 1), trapPC(63, 1))
 
   out.targetPc.bits.pc        := RegEnable(debugPc, valid || hasExceptionInDmode)

@@ -50,6 +50,7 @@ object ArgParser {
       |--disable-alwaysdb
       |--enable-dfx
       |--enable-simfrontend
+      |--dump-csr
       |""".stripMargin
 
   def getConfigByName(confString: String): Parameters = {
@@ -61,7 +62,7 @@ object ArgParser {
     c.newInstance(1.asInstanceOf[Object]).asInstanceOf[Parameters]
   }
   def parse(args: Array[String]): (Parameters, Array[String], Array[String]) = {
-    val default = new TLConfig(1)
+    val default = new DefaultConfig(1)
     var firrtlOpts = Array[String]()
     var firtoolOpts = Array[String]()
     var pendingNumCores: Option[Int] = None
@@ -93,7 +94,7 @@ object ArgParser {
           nextOption(nextConfig, tail)
         case "--issue" :: issueString :: tail =>
           nextOption(config.alter((site, here, up) => {
-            case coupledL2.tl2chi.CHIIssue => issueString
+            case xscache.chi.CHIIssue => issueString
           }), tail)
         case "--num-cores" :: value :: tail =>
           val cores = value.toInt
@@ -165,7 +166,7 @@ object ArgParser {
           }), tail)
         case "--enable-ns" :: tail =>
           nextOption(config.alter((site, here, up) => {
-            case coupledL2.tl2chi.NonSecureKey => true
+            case xscache.chi.NonSecureKey => true
           }), tail)
         case "--firtool-opt" :: option :: tail =>
           firtoolOpts ++= option.split(" ").filter(_.nonEmpty)
@@ -193,20 +194,14 @@ object ArgParser {
             case SoCParamsKey =>
               val socParam = up(SoCParamsKey)
               val banks = socParam.L3NBanks
-              val l3Ways = socParam.L3CacheParamsOpt.map(_.ways)
-              val l3Sets = l3Ways.map(value.toInt * 1024 / banks / _ / 64)
-              val openLLCWays = socParam.OpenLLCParamsOpt.map(_.ways)
-              val openLLCSets = openLLCWays.map(value.toInt * 1024 / banks / _ / 64)
-              val newL3Param = socParam.L3CacheParamsOpt.map(_.copy(
-                sets = l3Sets.get
-              ))
-              val openLLCParam = socParam.OpenLLCParamsOpt.map(_.copy(
-                sets = openLLCSets.get
-              ))
-              socParam.copy(
-                L3CacheParamsOpt = newL3Param,
-                OpenLLCParamsOpt = openLLCParam
-              )
+              val openLLCParam = socParam.OpenLLCParamsOpt.map { llc =>
+                llc.copy(sets = value.toInt * 1024 / banks / llc.ways / 64)
+              }
+              socParam.copy(OpenLLCParamsOpt = openLLCParam)
+          }), tail)
+        case "--sim-mem-size" :: value :: tail =>
+          nextOption(config.alter((site, here, up) => {
+            case DebugOptionsKey => up(DebugOptionsKey).copy(SimMemSize = value.toLong * 1024 * 1024 * 1024) // GB
           }), tail)
         case "--dfx" :: value :: tail =>
           nextOption(config.alter((site, here, up) => {
@@ -230,7 +225,7 @@ object ArgParser {
           }), tail)
         case "--chi-addr-width" :: value :: tail =>
           nextOption(config.alter((site, here, up) => {
-            case coupledL2.tl2chi.CHIAddrWidthKey => value.toInt
+            case xscache.chi.CHIAddrWidthKey => value.toInt
           }), tail)
         case "--wfi-resume" :: value :: tail =>
           nextOption(config.alter((site, here, up) => {
@@ -242,6 +237,10 @@ object ArgParser {
           }), tail)
         case "--yaml-config" :: yamlFile :: tail =>
           nextOption(YamlParser.parseYaml(config, yamlFile), tail)
+        case "--dump-csr" :: tail =>
+          nextOption(config.alter((site, here, up) => {
+            case DebugOptionsKey => up(DebugOptionsKey).copy(DumpCSR = true)
+          }), tail)
         case option :: tail =>
           // unknown option, maybe a firrtl option, skip
           firrtlOpts :+= option

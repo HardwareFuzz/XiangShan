@@ -37,7 +37,7 @@ import xiangshan.PerfDebugInfo
 import xiangshan.backend.GPAMemEntry
 import xiangshan.backend.{BackendParams, RatToVecExcpMod, RegWriteFromRab, VecExcpInfo}
 import xiangshan.backend.Bundles._
-import xiangshan.backend.decode.isa.bitfield.XSInstBitFields
+import xiangshan.backend.decode.isa.bitfield.{OPCODE5Bit, XSInstBitFields}
 import xiangshan.backend.fu.{FuConfig, FuType}
 import xiangshan.frontend.ftq.FtqPtr
 import xiangshan.mem.{LqPtr, LsqEnqIO, SqPtr}
@@ -89,8 +89,7 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
     val csr = new RobCSRIO
     val snpt = Input(new SnapshotPort)
     val robFull = Output(Bool())
-    val headNotReady = Output(Bool())
-    val cpu_halt = Output(Bool())
+    val cpu_wfi = Output(Bool())
     val wfi = new Bundle {
       val wfiReq = Output(Bool())
       val safeFromMem = Input(Bool())
@@ -120,8 +119,13 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
       val logicPhyRegMap = Vec(RabCommitWidth, ValidIO(new RegWriteFromRab))
       val excpInfo = ValidIO(new VecExcpInfo)
     })
+    val IssueQueueDeqSum  = backendParams.allIssueParams.map(_.numDeq).sum
     val debug_ls = Flipped(new DebugLSIO)
     val debugRobHeadFuType = Output(FuType())
+    val debugBlockBackward = Option.when(backendParams.debugEn)(Output(Bool()))
+    val debugWaitForward   = Option.when(backendParams.debugEn)(Output(Bool()))
+    val debugIQDeqRobIdxVec = Option.when(backendParams.debugEn)(Vec(IssueQueueDeqSum, Flipped(ValidIO(new RobPtr()))))
+    val debugRobHeadStall = Option.when(backendParams.debugEn)(Output(Bool()))
     val debugEnqLsq = Input(new LsqEnqIO)
     val debugHeadLsIssue = Input(Bool())
     val lsTopdownInfo = Vec(LduCnt + HyuCnt, Input(new LsTopdownInfo))
@@ -131,13 +135,17 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
       val robHeadLqIdx = Valid(new LqPtr)
     }
     val debugRolling = new RobDebugRollingIO
-    val debugInstrAddrTransType = Input(new AddrTransType) 
+    val debugInstrAddrTransType = Input(new AddrTransType)
 
     // store event difftest information
     val storeDebugInfo = Vec(EnsbufferWidth, new Bundle {
       val robidx = Input(new RobPtr)
       val pc     = Output(UInt(VAddrBits.W))
     })
+    val atomicDebugInfo = new Bundle {
+      val robidx = Input(new RobPtr)
+      val pc     = Output(UInt(VAddrBits.W))
+    }
   })
 
   val exuWBs: Seq[ValidIO[WriteBackRobBundle]] = io.exuWriteback
@@ -298,12 +306,13 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
   }
   for (i <- 0 until CommitWidth) {
     commitInfo(i).ftqOffset := 0.U
-    commitInfo(i).ftqIdx := rawInfo(i).ftqIdx - 1.U + rawInfo(i).crossFtqCommit
+    commitInfo(i).ftqIdx := rawInfo(i).ftqIdx - 1.U
   }
 
   // data for debug
   // Warn: debug_* prefix should not exist in generated verilog.
   val debug_exuData = Reg(Vec(RobSize, UInt(XLEN.W))) //for debug
+  val debug_otherExuData = Reg(Vec(RobSize, UInt(XLEN.W))) //for debug
   val debug_exuDebug = Reg(Vec(RobSize, new DebugBundle)) //for debug
   val debug_lsInfo = RegInit(VecInit(Seq.fill(RobSize)(DebugLsInfo.init)))
   val debug_lsTopdownInfo = RegInit(VecInit(Seq.fill(RobSize)(LsTopdownInfo.init)))
@@ -363,9 +372,11 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
   val fflagsDataRead = Wire(Vec(CommitWidth, UInt(5.W)))
   val vxsatDataRead = Wire(Vec(CommitWidth, Bool()))
   io.robDeqPtr := deqPtr
-  
+
+  // topdown
   io.debugRobHeadFuType := robEntries(deqPtr.value).debug_fuType.getOrElse(0.U.asTypeOf(FuType()))
-  
+
+
   /**
    * connection of [[rab]]
    */
@@ -434,13 +445,16 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
     hasWaitForward := false.B
   }
 
+  io.debugWaitForward.foreach(_ := hasWaitForward)
+  io.debugBlockBackward.foreach(_ := hasBlockBackward)
+
   // The wait-for-interrupt (WFI) instruction waits in the ROB until an interrupt might need servicing.
   // io.csr.wfiEvent will be asserted if the WFI can resume execution, and we change the state to s_wfi_idle.
   // It does not affect how interrupts are serviced. Note that WFI is noSpecExec and it does not trigger interrupts.
   val hasWFI = RegInit(false.B)
   val wfiSafe = io.wfi.safeFromMem && io.wfi.safeFromFrontend
   io.wfi.wfiReq := hasWFI
-  io.cpu_halt := hasWFI && wfiSafe
+  io.cpu_wfi := hasWFI && wfiSafe
   // WFI Timeout: 2^20 = 1M cycles
   val wfi_cycles = RegInit(0.U(20.W))
   if (wfiResume) {
@@ -472,13 +486,14 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
       robEntries(enqIndex).perfDebugInfo.foreach(_.tlbRespTime := timer)
       debug_lsInfo(enqIndex) := DebugLsInfo.init
       debug_lsTopdownInfo(enqIndex) := LsTopdownInfo.init
+      debug_otherExuData(enqIndex) := 0.U
       debug_lqIdxValid(enqIndex) := false.B
       debug_lsIssued(enqIndex) := false.B
       when (enqUop.waitForward) {
         hasWaitForward := true.B
       }
       val enqTriggerActionIsDebugMode = TriggerAction.isDmode(io.enq.req(i).bits.trigger)
-      val enqHasException = ExceptionNO.selectFrontend(enqUop.exceptionVec).asUInt.orR
+      val enqHasException = enqUop.exceptionVec.orR
       when(enqUop.isWFI && !enqHasException && !enqTriggerActionIsDebugMode) {
         hasWFI := true.B
       }
@@ -550,8 +565,8 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
   // lqEnq
   io.debugEnqLsq.needAlloc.map(_(0)).zip(io.debugEnqLsq.req).foreach { case (alloc, req) =>
     when(io.debugEnqLsq.canAccept && alloc && req.valid) {
-      robEntries(req.bits.robIdx.value).debug_lqIdx.foreach(_ := req.bits.lqIdx)
-      debug_lqIdxValid(req.bits.robIdx.value) := true.B
+      robEntries(req.bits.uop.robIdx.value).debug_lqIdx.foreach(_ := req.bits.uop.lqIdx)
+      debug_lqIdxValid(req.bits.uop.robIdx.value) := true.B
     }
   }
 
@@ -566,9 +581,27 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
   for (wb <- exuWBs) {
     val wbIdx = wb.bits.robIdx.value
     val debug_Uop = robEntries(wbIdx)
+    val isScalarAmocasQ =
+      FuType.isAMO(debug_Uop.debug_fuType.getOrElse(0.U)) &&
+        LSUOpType.isAMOCASQ(debug_Uop.debug_fuOpType.getOrElse(0.U))
+    val primaryIntPdest = debug_Uop.debug_pdest.getOrElse(0.U)
+    val hasPrimaryIntWrite = debug_Uop.debug_rfWen.getOrElse(false.B) && primaryIntPdest =/= 0.U
+    val isSecondaryAmocasQWrite =
+      isScalarAmocasQ &&
+        wb.bits.params.writeIntRf.B &&
+        wb.bits.pdest =/= 0.U &&
+        hasPrimaryIntWrite &&
+        wb.bits.pdest =/= primaryIntPdest
     when(wb.valid) {
-      debug_exuData(wbIdx) := wb.bits.data
       debug_exuDebug(wbIdx) := wb.bits.debug
+      when (isSecondaryAmocasQWrite) {
+        debug_otherExuData(wbIdx) := wb.bits.data
+        robEntries(wbIdx).debug_otherPdest.foreach(_(0) := wb.bits.pdest)
+      }.otherwise {
+        debug_exuData(wbIdx) := wb.bits.data
+        robEntries(wbIdx).debug_pdest.foreach(_ := wb.bits.pdest)
+        robEntries(wbIdx).debug_rfWen.foreach(_ := wb.bits.params.writeIntRf.B && wb.bits.pdest =/= 0.U)
+      }
       wb.bits.perfDebugInfo.foreach { x =>
         robEntries(wbIdx).perfDebugInfo.foreach(_.enqRsTime := x.enqRsTime)
         robEntries(wbIdx).perfDebugInfo.foreach(_.selectTime := x.selectTime)
@@ -593,12 +626,6 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
   val writebackNum = PopCount(exuWBs.map(_.valid))
   XSInfo(writebackNum =/= 0.U, "writebacked %d insts\n", writebackNum)
 
-  for (i <- 0 until LoadPipelineWidth) {
-    when(RegNext(io.lsq.mmio(i))) {
-      robEntries(RegEnable(io.lsq.uop(i).robIdx, io.lsq.mmio(i)).value).mmio := true.B
-    }
-  }
-
 
   /**
    * RedirectOut: Interrupt and Exceptions
@@ -613,7 +640,7 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
   val deqNeedFlush = deqPtrEntry.needFlush && deqPtrEntry.commit_v && deqPtrEntry.commit_w
   val deqHitExceptionGenState = exceptionDataRead.valid && exceptionDataRead.bits.robIdx === deqPtr
   val deqNeedFlushAndHitExceptionGenState = deqNeedFlush && deqHitExceptionGenState
-  val exceptionGenStateIsException = exceptionDataRead.bits.exceptionVec.asUInt.orR || exceptionDataRead.bits.singleStep || TriggerAction.isDmode(exceptionDataRead.bits.trigger)
+  val exceptionGenStateIsException = exceptionDataRead.bits.exceptionVec.orR || exceptionDataRead.bits.singleStep || TriggerAction.isDmode(exceptionDataRead.bits.trigger)
   val deqHasException = deqNeedFlushAndHitExceptionGenState && exceptionGenStateIsException && RegNext(RegNext(deqPtrEntry.commit_w))
   val deqHasFlushPipe = deqNeedFlushAndHitExceptionGenState && exceptionDataRead.bits.flushPipe && !deqHasException && RegNext(RegNext(deqPtrEntry.commit_w))
   val deqHasReplayInst = deqNeedFlushAndHitExceptionGenState && exceptionDataRead.bits.replayInst
@@ -676,7 +703,7 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
   io.exception.bits.isForVSnonLeafPTE := io.readGPAMemData.isForVSnonLeafPTE
   io.exception.bits.instr := RegEnable(debug_deqUop.debug_instr.getOrElse(0.U), exceptionHappen)
   io.exception.bits.commitType := RegEnable(deqPtrEntry.commitType, exceptionHappen)
-  io.exception.bits.exceptionVec := RegEnable(exceptionDataRead.bits.exceptionVec, exceptionHappen)
+  io.exception.bits.exceptionVec extendFrom RegEnable(exceptionDataRead.bits.exceptionVec, exceptionHappen)
   // fetch trigger fire or execute ebreak
   io.exception.bits.isPcBkpt := RegEnable(
     exceptionDataRead.bits.exceptionVec(ExceptionNO.EX_BP) && (
@@ -867,6 +894,33 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
     val commitPerfDebugInfo = deqDebugInst.perfDebugInfo.getOrElse(0.U.asTypeOf(new PerfDebugInfo))
     val commitClkStart = commitPerfDebugInfo.logRunStartTime
     val commitClkEnd = timer
+    val commitLogRawInstr = deqDebugInst.debug_instr.getOrElse(0.U)
+    val commitLogInstr = commitLogRawInstr.asTypeOf(new XSInstBitFields)
+    val commitIsFli =
+      commitLogInstr.FUNCT7(6, 2) === "b11110".U &&
+        commitLogInstr.RS2 === 1.U &&
+        commitLogInstr.RM === 0.U &&
+        commitLogInstr.OPCODE5Bit === OPCODE5Bit.OP_FP
+    val commitIsZimop =
+      (BitPat("b1?00??0111??_?????_100_?????_1110011") === commitLogRawInstr) ||
+        (BitPat("b1?00??1???_?????_?????_100_?????_1110011") === commitLogRawInstr)
+    val commitLogArchRfWen = io.commits.info(i).rfWen && io.commits.info(i).debug_ldest.getOrElse(0.U) =/= 0.U
+    val commitLogDebugRfWen = deqDebugInst.debug_rfWen.getOrElse(false.B)
+    val commitLogRfWen =
+      (commitLogArchRfWen || commitLogDebugRfWen) && !commitIsFli
+    val commitLogPdest = deqDebugInst.debug_pdest.getOrElse(io.commits.info(i).debug_pdest.getOrElse(0.U))
+    val commitLogData =
+      Mux(
+        commitIsZimop && commitLogRfWen && commitLogPdest === 0.U,
+        0.U(XLEN.W),
+        debug_exuData(deqPtrVec(i).value)
+      )
+    val commitLogOtherPdest = io.commits.info(i).debug_otherPdest.getOrElse(VecInit(Seq.fill(7)(0.U(PhyRegIdxWidth.W))))(0)
+    val commitIsScalarAmocasQLog =
+      FuType.isAMO(deqDebugInst.debug_fuType.getOrElse(0.U)) &&
+        LSUOpType.isAMOCASQ(deqDebugInst.debug_fuOpType.getOrElse(0.U))
+    val commitHasOtherIntWrite = commitIsScalarAmocasQLog && commitLogOtherPdest =/= 0.U
+    val commitOtherLdest = io.commits.info(i).debug_ldest.getOrElse(0.U) + 1.U
 
     if (!env.EnableDebug) {
       when(io.commits.isCommit && io.commits.commitValid(i)) {
@@ -874,26 +928,56 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
           "retired hart %d pc %x wen %d ldest %d pdest %x data %x fflags: %b vxsat: %b clk_start %d clk_end %d clk_span %d\n",
           io.hartId,
           robEntries(deqPtrVec(i).value).debug_pc.getOrElse(0.U),
-          io.commits.info(i).rfWen,
+          commitLogRfWen,
           io.commits.info(i).debug_ldest.getOrElse(0.U),
-          io.commits.info(i).debug_pdest.getOrElse(0.U),
-          debug_exuData(deqPtrVec(i).value),
+          commitLogPdest,
+          commitLogData,
           fflagsDataRead(i),
           vxsatDataRead(i),
           commitClkStart,
           commitClkEnd,
           commitClkEnd - commitClkStart + 1.U
         )
+        when (commitHasOtherIntWrite) {
+          printf(
+            "retired hart %d pc %x wen %d ldest %d pdest %x data %x fflags: %b vxsat: %b clk_start %d clk_end %d clk_span %d\n",
+            io.hartId,
+            robEntries(deqPtrVec(i).value).debug_pc.getOrElse(0.U),
+            1.U,
+            commitOtherLdest,
+            commitLogOtherPdest,
+            debug_otherExuData(deqPtrVec(i).value),
+            fflagsDataRead(i),
+            vxsatDataRead(i),
+            commitClkStart,
+            commitClkEnd,
+            commitClkEnd - commitClkStart + 1.U
+          )
+        }
       }
     }
     XSInfo(io.commits.isCommit && io.commits.commitValid(i),
       "retired hart %d pc %x wen %d ldest %d pdest %x data %x fflags: %b vxsat: %b clk_start %d clk_end %d clk_span %d\n",
       io.hartId,
       robEntries(deqPtrVec(i).value).debug_pc.getOrElse(0.U),
-      io.commits.info(i).rfWen,
+      commitLogRfWen,
       io.commits.info(i).debug_ldest.getOrElse(0.U),
-      io.commits.info(i).debug_pdest.getOrElse(0.U),
-      debug_exuData(deqPtrVec(i).value),
+      commitLogPdest,
+      commitLogData,
+      fflagsDataRead(i),
+      vxsatDataRead(i),
+      commitClkStart,
+      commitClkEnd,
+      commitClkEnd - commitClkStart + 1.U
+    )
+    XSInfo(io.commits.isCommit && io.commits.commitValid(i) && commitHasOtherIntWrite,
+      "retired hart %d pc %x wen %d ldest %d pdest %x data %x fflags: %b vxsat: %b clk_start %d clk_end %d clk_span %d\n",
+      io.hartId,
+      robEntries(deqPtrVec(i).value).debug_pc.getOrElse(0.U),
+      1.U,
+      commitOtherLdest,
+      commitLogOtherPdest,
+      debug_otherExuData(deqPtrVec(i).value),
       fflagsDataRead(i),
       vxsatDataRead(i),
       commitClkStart,
@@ -1141,7 +1225,7 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
 
     // trace
     val taken = branchWBs.map(writeback => writeback.valid && writeback.bits.robIdx.value === i.U && writeback.bits.redirect.get.bits.taken).reduce(_ || _)
-    when(robEntries(i).valid && Itype.isBranchType(robEntries(i).traceBlockInPipe.itype) && taken){
+    when(robEntries(i).valid && Itype.isNonTaken(robEntries(i).traceBlockInPipe.itype) && taken){
       // BranchType code(notaken itype = 4) must be correctly replaced!
       robEntries(i).traceBlockInPipe.itype := Itype.Taken
     }
@@ -1199,7 +1283,7 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
 
     // trace
     val taken = branchWBs.map(writeback => writeback.valid && writeback.bits.robIdx.value === needUpdateRobIdx(i) && writeback.bits.redirect.get.bits.taken).reduce(_ || _)
-    when(robBanksRdata(i).valid && Itype.isBranchType(robBanksRdata(i).traceBlockInPipe.itype) && taken){
+    when(robBanksRdata(i).valid && Itype.isNonTaken(robBanksRdata(i).traceBlockInPipe.itype) && taken){
       // BranchType code(notaken itype = 4) must be correctly replaced!
       needUpdate(i).traceBlockInPipe.itype := Itype.Taken
     }
@@ -1243,7 +1327,7 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
     exceptionGen.io.enq(i).bits.robIdx := io.enq.req(i).bits.robIdx
     exceptionGen.io.enq(i).bits.ftqPtr := io.enq.req(i).bits.ftqPtr
     exceptionGen.io.enq(i).bits.ftqOffset := io.enq.req(i).bits.ftqOffset
-    exceptionGen.io.enq(i).bits.exceptionVec := ExceptionNO.selectFrontend(io.enq.req(i).bits.exceptionVec)
+    exceptionGen.io.enq(i).bits.exceptionVec := io.enq.req(i).bits.exceptionVec
     exceptionGen.io.enq(i).bits.hasException := io.enq.req(i).bits.hasException
     exceptionGen.io.enq(i).bits.isEnqExcp := io.enq.req(i).bits.hasException
     exceptionGen.io.enq(i).bits.isFetchMalAddr := io.enq.req(i).bits.isFetchMalAddr
@@ -1279,8 +1363,8 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
     // only enq inst use ftqPtr to read gpa
     exc_wb.bits.ftqPtr          := 0.U.asTypeOf(exc_wb.bits.ftqPtr)
     exc_wb.bits.ftqOffset       := 0.U.asTypeOf(exc_wb.bits.ftqOffset)
-    exc_wb.bits.exceptionVec    := wb.bits.exceptionVec.get
-    exc_wb.bits.hasException    := wb.bits.exceptionVec.get.asUInt.orR // Todo: use io.writebackNeedFlush(i) instead
+    exc_wb.bits.exceptionVec    := wb.bits.exceptionVec
+    exc_wb.bits.hasException    := wb.bits.exceptionVec.orR // Todo: use io.writebackNeedFlush(i) instead
     exc_wb.bits.isEnqExcp       := false.B
     exc_wb.bits.isFetchMalAddr  := false.B
     exc_wb.bits.flushPipe       := wb.bits.flushPipe.getOrElse(false.B)
@@ -1290,7 +1374,7 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
     exc_wb.bits.crossPageIPFFix := false.B
     val trigger = wb.bits.trigger.getOrElse(TriggerAction.None).asTypeOf(exc_wb.bits.trigger)
     exc_wb.bits.trigger := trigger
-    exc_wb.bits.vstartEn := (if (wb.bits.vls.nonEmpty) wb.bits.exceptionVec.get.asUInt.orR || TriggerAction.isDmode(trigger) else 0.U)
+    exc_wb.bits.vstartEn := (if (wb.bits.vls.nonEmpty) wb.bits.exceptionVec.orR || TriggerAction.isDmode(trigger) else 0.U)
     exc_wb.bits.vstart := (if (wb.bits.vls.nonEmpty) wb.bits.vls.get.vpu.vstart else 0.U)
     exc_wb.bits.vuopIdx := (if (wb.bits.vls.nonEmpty) wb.bits.vls.get.vpu.vuopIdx else 0.U)
     exc_wb.bits.isVecLoad := wb.bits.vls.map(_.isVecLoad).getOrElse(false.B)
@@ -1319,7 +1403,6 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
   }
   io.csr.perfinfo.retiredInstr := retireCounter
   io.robFull := !allowEnqueue
-  io.headNotReady := commit_vDeqGroup(deqPtr.value(bankNumWidth-1, 0)) && !commit_wDeqGroup(deqPtr.value(bankNumWidth-1, 0))
 
   io.toVecExcpMod.logicPhyRegMap := rab.io.toVecExcpMod.logicPhyRegMap
   io.toVecExcpMod.excpInfo := vecExcpInfo
@@ -1390,7 +1473,7 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
   val commitIsLoad = io.commits.info.map(_.commitType).map(_ === CommitType.LOAD)
   val commitLoadValid = io.commits.commitValid.zip(commitIsLoad).map { case (v, t) => v && t }
   XSPerfAccumulate("commitInstrLoad", ifCommit(PopCount(commitLoadValid)))
-  val commitIsBranch = io.commits.info.map(_.commitType).map(_ === CommitType.BRANCH)
+  val commitIsBranch = io.commits.info.map(info => Itype.isBranch(info.traceBlockInPipe.itype))
   val commitBranchValid = io.commits.commitValid.zip(commitIsBranch).map { case (v, t) => v && t }
   XSPerfAccumulate("commitInstrBranch", ifCommit(PopCount(commitBranchValid)))
   val commitIsStore = io.commits.info.map(_.commitType).map(_ === CommitType.STORE)
@@ -1440,10 +1523,10 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
   }
 
   XSPerfAccumulate("waitNormalCycle", deqNotWritebacked && deqUopCommitType === CommitType.NORMAL)
-  XSPerfAccumulate("waitBranchCycle", deqNotWritebacked && deqUopCommitType === CommitType.BRANCH)
+  XSPerfAccumulate("waitBranchCycle", deqNotWritebacked && Itype.isBranch(debug_deqUop.traceBlockInPipe.itype))
   XSPerfAccumulate("waitLoadCycle", deqNotWritebacked   && deqUopCommitType === CommitType.LOAD)
   XSPerfAccumulate("waitStoreCycle", deqNotWritebacked  && deqUopCommitType === CommitType.STORE)
-  XSPerfReference("robHeadPC", 
+  XSPerfReference("robHeadPC",
     RegEnable(io.commits.info(0).debug_pc.getOrElse(0.U),
               0.U,
               io.commits.isCommit && io.commits.commitValid(0)))
@@ -1528,7 +1611,7 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
         debug_instData.executeLatency := wb.bits.perfDebugInfo.get.writebackTime - wb.bits.perfDebugInfo.get.issueTime
         debug_instData.rsFuLatency := wb.bits.perfDebugInfo.get.writebackTime - wb.bits.perfDebugInfo.get.enqRsTime
         debug_instData.tlbLatency := wb.bits.perfDebugInfo.get.tlbRespTime - wb.bits.perfDebugInfo.get.tlbFirstReqTime
-        debug_instData.exceptType := Cat(wb.bits.exceptionVec.getOrElse(ExceptionVec(false.B)))
+        debug_instData.exceptType := wb.bits.exceptionVec.asUInt
         debug_instData.lsInfo := debug_lsInfo(idx)
         // debug_instData.globalID := wb.bits.uop.ctrl.debug_globalID
         // debug_instData.instType := wb.bits.uop.ctrl.fuType
@@ -1581,6 +1664,43 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
     }
   }
 
+  // topdown
+  val allIssueParams = backendParams.allIssueParams.filter(_.StdCnt == 0)
+  val allExuParams = allIssueParams.map(_.exuBlockParams).flatten
+  val allFuConfigs = allExuParams.map(_.fuConfigs).flatten.toSet.toSeq
+  val sortedFuConfigs = allFuConfigs.sortBy(_.fuType.id)
+  val sortedFulatency = sortedFuConfigs.map(_.latency.latencyVal.getOrElse(4).asUInt)
+  val bypassLatency = 3.U
+  val writeBackLatency = 1.U
+
+  val candidateVec = Option.when(backendParams.debugEn)(Wire(Vec(RobSize, Vec(io.IssueQueueDeqSum, Bool()))))
+  candidateVec.foreach( _ := VecInit.tabulate(RobSize, io.IssueQueueDeqSum){ (index, i) =>
+    val deq = io.debugIQDeqRobIdxVec.get(i)
+    deq.valid && (deq.bits.value === index.U)
+  })
+  for (i <- 0 until RobSize) {
+    when(robEntries(i).valid){
+      robEntries(i).topdownIssued.foreach(_ := candidateVec.get(i).reduce(_ || _) || robEntries(i).topdownIssued.get)
+    }
+  }
+  if (backendParams.debugEn) {
+    dontTouch(candidateVec.get)
+  }
+
+  for (i <- 0 until RobSize) {
+    when(robEntries(i).valid){
+      val hasWriteBack = robEntries(i).uopNum === 0.U
+      robEntries(i).topdownIssueTime.foreach(_ := Mux(hasWriteBack , 0.U,
+        robEntries(i).topdownIssueTime.get +& robEntries(i).topdownIssued.get) )
+    }
+  }
+
+  io.debugRobHeadStall.foreach{ case stall =>
+    val deqEntry = robEntries(deqPtr.value)
+    val deqEntryNormalLatency = Mux1H(deqEntry.debug_fuType.get, sortedFulatency) +& bypassLatency +& writeBackLatency
+    stall := deqEntry.valid && (robEntries(deqPtr.value).topdownIssueTime.get > deqEntryNormalLatency)
+  }
+
   //difftest signals
   val firstValidCommit = (deqPtr + PriorityMux(io.commits.commitValid, VecInit(List.tabulate(CommitWidth)(_.U(log2Up(CommitWidth).W))))).value
 
@@ -1623,6 +1743,14 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
       val isRVC = dt_isRVC(ptr)
       val instr = uop.debug_instr.getOrElse(0.U).asTypeOf(new XSInstBitFields)
       val isVLoad = instr.isVecLoad
+      val commitIsFli =
+        instr.FUNCT7(6, 2) === "b11110".U &&
+          instr.RS2 === 1.U &&
+          instr.RM === 0.U &&
+          instr.OPCODE5Bit === OPCODE5Bit.OP_FP
+      val debugRfWen = robEntries(ptr).debug_rfWen.getOrElse(commitInfo.rfWen)
+      val archRfWen = commitInfo.rfWen && commitInfo.debug_ldest.get =/= 0.U
+      val debugPdest = robEntries(ptr).debug_pdest.getOrElse(commitInfo.debug_pdest.get)
 
       val diffMaxPhyRegs = Seq(MaxPhyRegs, 2 * (V0PhyRegs + VfPhyRegs)).max // For width of wpdest and otherwpdest
       val difftest = DifftestModule(new DiffInstrCommit(diffMaxPhyRegs), delay = 3, dontCare = true)
@@ -1632,23 +1760,34 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
       difftest.valid := io.commits.commitValid(i) && io.commits.isCommit
       difftest.skip := dt_skip
       difftest.isRVC := isRVC
-      difftest.rfwen := io.commits.commitValid(i) && commitInfo.rfWen && commitInfo.debug_ldest.get =/= 0.U
-      difftest.fpwen := io.commits.commitValid(i) && uop.fpWen
+      difftest.rfwen := io.commits.commitValid(i) && (archRfWen || debugRfWen) && !commitIsFli
+      difftest.fpwen := io.commits.commitValid(i) && (uop.fpWen || commitIsFli)
       difftest.vecwen := io.commits.commitValid(i) && uop.debug_vecWen.getOrElse(false.B)
       difftest.v0wen := io.commits.commitValid(i) && (uop.debug_v0Wen.getOrElse(false.B) || isVLoad && instr.VD === 0.U)
-      difftest.wpdest := commitInfo.debug_pdest.get
+      difftest.wpdest := debugPdest
       difftest.wdest := Mux(isVLoad, instr.VD, commitInfo.debug_ldest.get)
       // When merge v0Rat and vecRat, the index of vecRats should starts from V0PhyRegs
       // Split each 128-bit vector reg into two 64-bit regs (lo, hi), so convert index to (2*index, 2*index+1)
-      difftest.otherwpdest := debug_VecOtherPdest(ptr).zipWithIndex.flatMap { case (pdest, idx) =>
+      val diffOtherPdestWidth = log2Ceil(diffMaxPhyRegs)
+      val scalarAmocasQOtherPdest =
+        ZeroExt(commitInfo.debug_otherPdest.getOrElse(VecInit(Seq.fill(7)(0.U(PhyRegIdxWidth.W))))(0), diffOtherPdestWidth)
+      val vecOtherPdest = debug_VecOtherPdest(ptr).zipWithIndex.flatMap { case (pdest, idx) =>
         val vecDest = if (idx == 0) {
           Mux(difftest.v0wen, pdest, pdest + V0PhyRegs.U)
         } else {
           pdest + V0PhyRegs.U
         }
         val splitDest = (vecDest << 1).asUInt
-        Seq(splitDest, splitDest + 1.U)
+        Seq(
+          ZeroExt(splitDest, diffOtherPdestWidth),
+          ZeroExt(splitDest + 1.U, diffOtherPdestWidth)
+        )
       }
+      val scalarOtherPdest = Seq(scalarAmocasQOtherPdest) ++ Seq.fill(15)(0.U(diffOtherPdestWidth.W))
+      val commitIsScalarAmocasQ =
+        FuType.isAMO(uop.debug_fuType.getOrElse(0.U)) &&
+          LSUOpType.isAMOCASQ(uop.debug_fuOpType.getOrElse(0.U))
+      difftest.otherwpdest := Mux(commitIsScalarAmocasQ, VecInit(scalarOtherPdest), VecInit(vecOtherPdest))
       difftest.nFused := instrSize - 1.U
       when(difftest.valid) {
         assert(instrSize >= 1.U)
@@ -1705,15 +1844,18 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
 
   //store evetn difftest information
   io.storeDebugInfo := DontCare
+  io.atomicDebugInfo := DontCare
   if (env.EnableDifftest) {
     io.storeDebugInfo.map{port =>
       port.pc := robEntries(port.robidx.value).debug_pc.getOrElse(0.U)
     }
+    io.atomicDebugInfo.pc := robEntries(io.atomicDebugInfo.robidx.value).debug_pc.getOrElse(0.U)
   }
- 
+
   val misPred = io.redirect.valid && io.redirect.bits.isMisPred
   val brhJump = PopCount(isBrhOrJmpWBs.map(wb => wb.valid))
 
+  XSPerfAccumulate("branch_jump", brhJump)
   XSPerfAccumulate("br_mis_pred", misPred)
   XSPerfAccumulate("total_flush", io.redirect.valid)
 
@@ -1744,8 +1886,8 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
   generatePerfEvent()
 
   // max commit-stuck cycle
-  val deqismmio = Mux(robEntries(deqPtr.value).valid, robEntries(deqPtr.value).mmio, false.B)
-  val commitStuck = (!io.commits.commitValid.reduce(_ || _) || !io.commits.isCommit) && !deqismmio
+  val mmioBusy = io.lsq.mmioBusy // lsq know uncache request is rob head
+  val commitStuck = (!io.commits.commitValid.reduce(_ || _) || !io.commits.isCommit) && !mmioBusy
   val commitStuckCycle = RegInit(0.U(log2Up(maxCommitStuck).W))
   when(commitStuck) {
     commitStuckCycle := commitStuckCycle + 1.U

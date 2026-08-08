@@ -24,7 +24,7 @@ import freechips.rocketchip.rocket.CustomInstructions._
 import freechips.rocketchip.util.uintToBitPat
 import utility._
 import utils._
-import xiangshan.ExceptionNO.{EX_II, breakPoint, illegalInstr, virtualInstr}
+import xiangshan.ExceptionNO.{breakPoint, illegalInstr, virtualInstr}
 import xiangshan._
 import xiangshan.backend.fu.FuType
 import xiangshan.backend.Bundles.{DecodeInUop, DecodeOutUop}
@@ -34,6 +34,7 @@ import xiangshan.backend.fu.vector.Bundles.{VType, Vl, VSew}
 import xiangshan.backend.fu.wrapper.CSRToDecode
 import xiangshan.backend.decode.isa.CSRs
 import xiangshan.backend.decode.Zimop._
+import xiangshan.backend.decode.Zabha._
 import yunsuan.{FcmpOpCode, MULOpType, VfaluType, VfcvtType, VfmaType, VfmaOpCode}
 
 /**
@@ -256,6 +257,28 @@ object XDecode extends DecodeConstants {
     WRS_STO -> XSDecode(SrcType.pc , SrcType.imm, SrcType.X, FuType.csr, CSROpType.wrs_sto, SelImm.X , noSpec = T, blockBack = T),
 
     // RV64A
+    AMOADD_B  -> XSDecode(SrcType.reg, SrcType.reg, SrcType.X, FuType.mou, LSUOpType.amoadd_b , SelImm.X, xWen = T, noSpec = T, blockBack = T),
+    AMOXOR_B  -> XSDecode(SrcType.reg, SrcType.reg, SrcType.X, FuType.mou, LSUOpType.amoxor_b , SelImm.X, xWen = T, noSpec = T, blockBack = T),
+    AMOSWAP_B -> XSDecode(SrcType.reg, SrcType.reg, SrcType.X, FuType.mou, LSUOpType.amoswap_b, SelImm.X, xWen = T, noSpec = T, blockBack = T),
+    AMOAND_B  -> XSDecode(SrcType.reg, SrcType.reg, SrcType.X, FuType.mou, LSUOpType.amoand_b , SelImm.X, xWen = T, noSpec = T, blockBack = T),
+    AMOOR_B   -> XSDecode(SrcType.reg, SrcType.reg, SrcType.X, FuType.mou, LSUOpType.amoor_b  , SelImm.X, xWen = T, noSpec = T, blockBack = T),
+    AMOMIN_B  -> XSDecode(SrcType.reg, SrcType.reg, SrcType.X, FuType.mou, LSUOpType.amomin_b , SelImm.X, xWen = T, noSpec = T, blockBack = T),
+    AMOMINU_B -> XSDecode(SrcType.reg, SrcType.reg, SrcType.X, FuType.mou, LSUOpType.amominu_b, SelImm.X, xWen = T, noSpec = T, blockBack = T),
+    AMOMAX_B  -> XSDecode(SrcType.reg, SrcType.reg, SrcType.X, FuType.mou, LSUOpType.amomax_b , SelImm.X, xWen = T, noSpec = T, blockBack = T),
+    AMOMAXU_B -> XSDecode(SrcType.reg, SrcType.reg, SrcType.X, FuType.mou, LSUOpType.amomaxu_b, SelImm.X, xWen = T, noSpec = T, blockBack = T),
+    AMOCAS_B  -> XSDecode(SrcType.reg, SrcType.reg, SrcType.X, FuType.mou, LSUOpType.amocas_b, SelImm.X, uopSplitType = UopSplitType.AMO_CAS_BHWD, xWen = T, noSpec = T, blockBack = T),
+
+    AMOADD_H  -> XSDecode(SrcType.reg, SrcType.reg, SrcType.X, FuType.mou, LSUOpType.amoadd_h , SelImm.X, xWen = T, noSpec = T, blockBack = T),
+    AMOXOR_H  -> XSDecode(SrcType.reg, SrcType.reg, SrcType.X, FuType.mou, LSUOpType.amoxor_h , SelImm.X, xWen = T, noSpec = T, blockBack = T),
+    AMOSWAP_H -> XSDecode(SrcType.reg, SrcType.reg, SrcType.X, FuType.mou, LSUOpType.amoswap_h, SelImm.X, xWen = T, noSpec = T, blockBack = T),
+    AMOAND_H  -> XSDecode(SrcType.reg, SrcType.reg, SrcType.X, FuType.mou, LSUOpType.amoand_h , SelImm.X, xWen = T, noSpec = T, blockBack = T),
+    AMOOR_H   -> XSDecode(SrcType.reg, SrcType.reg, SrcType.X, FuType.mou, LSUOpType.amoor_h  , SelImm.X, xWen = T, noSpec = T, blockBack = T),
+    AMOMIN_H  -> XSDecode(SrcType.reg, SrcType.reg, SrcType.X, FuType.mou, LSUOpType.amomin_h , SelImm.X, xWen = T, noSpec = T, blockBack = T),
+    AMOMINU_H -> XSDecode(SrcType.reg, SrcType.reg, SrcType.X, FuType.mou, LSUOpType.amominu_h, SelImm.X, xWen = T, noSpec = T, blockBack = T),
+    AMOMAX_H  -> XSDecode(SrcType.reg, SrcType.reg, SrcType.X, FuType.mou, LSUOpType.amomax_h , SelImm.X, xWen = T, noSpec = T, blockBack = T),
+    AMOMAXU_H -> XSDecode(SrcType.reg, SrcType.reg, SrcType.X, FuType.mou, LSUOpType.amomaxu_h, SelImm.X, xWen = T, noSpec = T, blockBack = T),
+    AMOCAS_H  -> XSDecode(SrcType.reg, SrcType.reg, SrcType.X, FuType.mou, LSUOpType.amocas_h, SelImm.X, uopSplitType = UopSplitType.AMO_CAS_BHWD, xWen = T, noSpec = T, blockBack = T),
+
     AMOADD_W  -> XSDecode(SrcType.reg, SrcType.reg, SrcType.X, FuType.mou, LSUOpType.amoadd_w , SelImm.X, xWen = T, noSpec = T, blockBack = T),
     AMOXOR_W  -> XSDecode(SrcType.reg, SrcType.reg, SrcType.X, FuType.mou, LSUOpType.amoxor_w , SelImm.X, xWen = T, noSpec = T, blockBack = T),
     AMOSWAP_W -> XSDecode(SrcType.reg, SrcType.reg, SrcType.X, FuType.mou, LSUOpType.amoswap_w, SelImm.X, xWen = T, noSpec = T, blockBack = T),
@@ -265,7 +288,7 @@ object XDecode extends DecodeConstants {
     AMOMINU_W -> XSDecode(SrcType.reg, SrcType.reg, SrcType.X, FuType.mou, LSUOpType.amominu_w, SelImm.X, xWen = T, noSpec = T, blockBack = T),
     AMOMAX_W  -> XSDecode(SrcType.reg, SrcType.reg, SrcType.X, FuType.mou, LSUOpType.amomax_w , SelImm.X, xWen = T, noSpec = T, blockBack = T),
     AMOMAXU_W -> XSDecode(SrcType.reg, SrcType.reg, SrcType.X, FuType.mou, LSUOpType.amomaxu_w, SelImm.X, xWen = T, noSpec = T, blockBack = T),
-    AMOCAS_W  -> XSDecode(SrcType.reg, SrcType.reg, SrcType.X, FuType.mou, LSUOpType.amocas_w, SelImm.X, uopSplitType = UopSplitType.AMO_CAS_W, xWen = T, noSpec = T, blockBack = T),
+    AMOCAS_W  -> XSDecode(SrcType.reg, SrcType.reg, SrcType.X, FuType.mou, LSUOpType.amocas_w, SelImm.X, uopSplitType = UopSplitType.AMO_CAS_BHWD, xWen = T, noSpec = T, blockBack = T),
 
     AMOADD_D  -> XSDecode(SrcType.reg, SrcType.reg, SrcType.X, FuType.mou, LSUOpType.amoadd_d , SelImm.X, xWen = T, noSpec = T, blockBack = T),
     AMOXOR_D  -> XSDecode(SrcType.reg, SrcType.reg, SrcType.X, FuType.mou, LSUOpType.amoxor_d , SelImm.X, xWen = T, noSpec = T, blockBack = T),
@@ -276,7 +299,7 @@ object XDecode extends DecodeConstants {
     AMOMINU_D -> XSDecode(SrcType.reg, SrcType.reg, SrcType.X, FuType.mou, LSUOpType.amominu_d, SelImm.X, xWen = T, noSpec = T, blockBack = T),
     AMOMAX_D  -> XSDecode(SrcType.reg, SrcType.reg, SrcType.X, FuType.mou, LSUOpType.amomax_d , SelImm.X, xWen = T, noSpec = T, blockBack = T),
     AMOMAXU_D -> XSDecode(SrcType.reg, SrcType.reg, SrcType.X, FuType.mou, LSUOpType.amomaxu_d, SelImm.X, xWen = T, noSpec = T, blockBack = T),
-    AMOCAS_D  -> XSDecode(SrcType.reg, SrcType.reg, SrcType.X, FuType.mou, LSUOpType.amocas_d, SelImm.X, uopSplitType = UopSplitType.AMO_CAS_D, xWen = T, noSpec = T, blockBack = T),
+    AMOCAS_D  -> XSDecode(SrcType.reg, SrcType.reg, SrcType.X, FuType.mou, LSUOpType.amocas_d, SelImm.X, uopSplitType = UopSplitType.AMO_CAS_BHWD, xWen = T, noSpec = T, blockBack = T),
 
     AMOCAS_Q  -> XSDecode(SrcType.reg, SrcType.reg, SrcType.X, FuType.mou, LSUOpType.amocas_q, SelImm.X, uopSplitType = UopSplitType.AMO_CAS_Q, xWen = T, noSpec = T, blockBack = T),
 
@@ -513,6 +536,11 @@ object HypervisorDecode extends DecodeConstants {
   )
 }
 
+object MptFenceDecode extends DecodeConstants {
+  override val decodeArray: Array[(BitPat, XSDecodeBase)] = Array(
+    MFENCE -> XSDecode(SrcType.reg, SrcType.reg, SrcType.X, FuType.fence, FenceOpType.mfence, SelImm.X, noSpec = T, blockBack = T, flushPipe = T),
+  )
+}
 object ZicondDecode extends DecodeConstants {
   override val decodeArray: Array[(BitPat, XSDecodeBase)] = Array(
     CZERO_EQZ   -> XSDecode(SrcType.reg, SrcType.reg, SrcType.X, FuType.alu, ALUOpType.czero_eqz, SelImm.X, xWen = T, canRobCompress = T),
@@ -794,7 +822,6 @@ class DecodeUnit(implicit p: Parameters) extends XSModule with DecodeUnitConstan
   val ctrl_flow = io.enq.decodeInUop // input with RVC Expanded
 
   private val inst: XSInstBitFields = io.enq.decodeInUop.instr.asTypeOf(new XSInstBitFields)
-
   val decode_table: Array[(BitPat, List[BitPat])] = XDecode.table ++
     FpDecode.table ++
 //    FDivSqrtDecode.table ++
@@ -807,7 +834,8 @@ class DecodeUnit(implicit p: Parameters) extends XSModule with DecodeUnitConstan
     VecDecoder.table ++
     ZicondDecode.table ++
     ZimopDecode.table ++
-    ZfaDecode.table
+    ZfaDecode.table ++
+    (if (HasMptCheck) MptFenceDecode.table else Array.empty[(BitPat, List[BitPat])])
   require(decode_table.map(_._2.length == 14).reduce(_ && _), "Decode tables have different column size")
   // assertion for LUI: only LUI should be assigned `selImm === SelImm.IMM_U && fuType === FuType.alu`
   val luiMatch = (t: Seq[BitPat]) => t(3).value == FuType.alu.ohid && t.reverse.head.value == SelImm.IMM_U.litValue
@@ -876,6 +904,7 @@ class DecodeUnit(implicit p: Parameters) extends XSModule with DecodeUnitConstan
 
   private val exceptionII =
     decodedInst.selImm === SelImm.INVALID_INSTR ||
+    (if (HasMptCheck) (io.fromCSR.illegalInst.mfence.get && FuType.FuTypeOrR(decodedInst.fuType, FuType.fence) && decodedInst.fuOpType === FenceOpType.mfence) else false.B) ||
     io.fromCSR.illegalInst.sfenceVMA  && FuType.FuTypeOrR(decodedInst.fuType, FuType.fence) && decodedInst.fuOpType === FenceOpType.sfence  ||
     io.fromCSR.illegalInst.sfencePart && FuType.FuTypeOrR(decodedInst.fuType, FuType.fence) && decodedInst.fuOpType === FenceOpType.nofence ||
     io.fromCSR.illegalInst.hfenceGVMA && FuType.FuTypeOrR(decodedInst.fuType, FuType.fence) && decodedInst.fuOpType === FenceOpType.hfence_g ||
@@ -912,7 +941,7 @@ class DecodeUnit(implicit p: Parameters) extends XSModule with DecodeUnitConstan
     io.fromCSR.virtualInst.cboI       && isCboInval
 
 
-  decodedInst.exceptionVec(illegalInstr) := exceptionII || io.enq.decodeInUop.exceptionVec(EX_II)
+  decodedInst.exceptionVec(illegalInstr) := exceptionII || io.enq.decodeInUop.exceptionVec(illegalInstr)
   decodedInst.exceptionVec(virtualInstr) := exceptionVI
 
   //update exceptionVec: from frontend trigger's breakpoint exception. To reduce 1 bit of overhead in ibuffer entry.

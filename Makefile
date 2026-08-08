@@ -49,7 +49,7 @@ MILL ?= $(if $(wildcard $(abspath ./mill)),$(abspath ./mill),mill)
 SCALA_FILE = $(shell find ./src/main/scala -name '*.scala')
 TEST_FILE = $(shell find ./src/test/scala -name '*.scala')
 
-CONFIG ?= TLConfig
+CONFIG ?= DefaultConfig
 NUM_CORES ?= 1
 ISSUE ?= E.b
 CHISEL_TARGET ?= systemverilog
@@ -75,6 +75,12 @@ JVM_XSS ?= 256m
 
 # mill arguments for build.sc
 MILL_BUILD_ARGS = -Djvm-xmx=$(JVM_XMX) -Djvm-xss=$(JVM_XSS)
+
+# NOTE: ccache is intentionally disabled by default, as:
+#   1. it does not help XiangShan's build performance in most cases, as slight change in chisel result in significant change in cpp code
+#   2. it introduces too much IO overhead
+# NOTE: use `make emu OBJCACHE=ccache` to enable it
+OBJCACHE ?=
 
 # common chisel args
 MFC_ARGS = --target $(CHISEL_TARGET) \
@@ -160,6 +166,11 @@ endif
 override SIM_ARGS += --with-dramsim3
 endif
 
+# SimAXIMem size in GB (for sim-verilog only)
+ifneq ($(SIM_MEM_SIZE),)
+override SIM_ARGS += --sim-mem-size $(SIM_MEM_SIZE)
+endif
+
 # run emu with chisel-db
 ifeq ($(WITH_CHISELDB),1)
 override SIM_ARGS += --with-chiseldb
@@ -201,11 +212,10 @@ endif
 
 # emu for the release version
 RELEASE_ARGS += --fpga-platform --reset-gen --firtool-opt --ignore-read-enable-mem --firtool-opt "--default-layer-specialization=disable"
-override DEBUG_ARGS += --firtool-opt "--default-layer-specialization=enable"
 ifeq ($(FPGA), 1)
-override DEBUG_ARGS	+= --fpga-platform --disable-all --remove-assert
+override DEBUG_ARGS	+= --fpga-platform --firtool-opt "--default-layer-specialization=disable"
 else
-override DEBUG_ARGS	+= --enable-difftest
+override DEBUG_ARGS	+= --enable-difftest --firtool-opt "--default-layer-specialization=enable"
 endif
 ifeq ($(RELEASE),1)
 override SIM_ARGS += $(RELEASE_ARGS)
@@ -225,6 +235,10 @@ ifeq ($(or $(PLDM),$(FPGA)), 1)
 TOPMAIN_ARGS += $(DEBUG_ARGS)
 else
 TOPMAIN_ARGS += $(RELEASE_ARGS)
+endif
+
+ifeq ($(DUMP_CSR),1)
+TOPMAIN_ARGS += --dump-csr
 endif
 
 TIMELOG = $(BUILD_DIR)/time.log
@@ -315,7 +329,7 @@ GIT_FORCE_FLAG := $(if $(GIT_FORCE_INIT),--force)
 init:
 	git submodule update --init $(GIT_FORCE_FLAG)
 	cd rocket-chip && git submodule update --init $(GIT_FORCE_FLAG) cde hardfloat
-	cd openLLC && git submodule update --init $(GIT_FORCE_FLAG) openNCB
+	cd XSCache && git submodule update --init $(GIT_FORCE_FLAG) OpenNCB
 
 # Initialize necessary submodules (force)
 #   This ensure that all submodules files are checked out to the correct commit. Good for CI.
@@ -346,7 +360,7 @@ emu-mk: sim-verilog
 	$(MAKE) -C ./difftest NOOP_HOME=$(abspath .) DESIGN_DIR=$(abspath .) CONFIG= emu-mk NUM_CORES=$(NUM_CORES) RTL_SUFFIX=$(RTL_SUFFIX)
 
 emu: $(call docker-deps,emu-mk)
-	$(MAKE) -C ./difftest NOOP_HOME=$(abspath .) DESIGN_DIR=$(abspath .) CONFIG= emu NUM_CORES=$(NUM_CORES) RTL_SUFFIX=$(RTL_SUFFIX)
+	$(MAKE) -C ./difftest NOOP_HOME=$(abspath .) DESIGN_DIR=$(abspath .) CONFIG= emu NUM_CORES=$(NUM_CORES) RTL_SUFFIX=$(RTL_SUFFIX) OBJCACHE=$(OBJCACHE)
 
 emu-cov: $(call docker-deps,emu-mk)
 	$(MAKE) -C ./difftest NOOP_HOME=$(abspath .) DESIGN_DIR=$(abspath .) CONFIG= EMU_COVERAGE=1 emu NUM_CORES=$(NUM_CORES) RTL_SUFFIX=$(RTL_SUFFIX)

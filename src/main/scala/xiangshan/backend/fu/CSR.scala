@@ -24,10 +24,10 @@ import freechips.rocketchip.util._
 import utility.MaskedRegMap.WritableMask
 import utils._
 import utility._
-import xiangshan.ExceptionNO._
 import xiangshan._
 import xiangshan.backend.fu.util._
 import xiangshan.cache._
+import xiangshan.backend.BackendParams
 import xiangshan.backend.Bundles.{ExceptionInfo, TrapInstInfo}
 import xiangshan.backend.fu.NewCSR.CSREvents.TargetPCBundle
 import xiangshan.backend.fu.NewCSR.CSRNamedConstant.ContextStatus
@@ -65,13 +65,6 @@ class PerfCounterIO(implicit p: Parameters) extends XSBundle {
   val perfEventsLsu       = Vec(numCSRPCntLsu, new PerfEvent)
   val perfEventsHc        = Vec(numPCntHc * coreParams.L2NBanks + 1, new PerfEvent)
   val retiredInstr = UInt(7.W)
-  val frontendInfo = new Bundle {
-    val ibufFull  = Bool()
-    val bpuInfo = new Bundle {
-      val bpRight = UInt(XLEN.W)
-      val bpWrong = UInt(XLEN.W)
-    }
-  }
   val ctrlInfo = new Bundle {
     val robFull   = Bool()
     val intdqFull = Bool()

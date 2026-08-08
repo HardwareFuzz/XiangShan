@@ -34,6 +34,8 @@ import xiangshan.frontend.bpu.utage.MicroTageParameters
 case class BpuParameters(
     // general
     FetchBlockAlignSize: Option[Int] = None, // bytes, if None, use half-align (FetchBLockSize / 2) by default
+    // ppa
+    NumStartPcDuplicate: Int = 3, // duplicate pc-related register to control fan-out
     // debug
     EnableBpTrace: Boolean = false,
     // history
@@ -61,15 +63,22 @@ trait HasBpuParameters extends HasFrontendParameters {
   def FetchBlockAlignWidth:   Int = log2Ceil(FetchBlockAlignSize)
   def FetchBlockAlignInstNum: Int = FetchBlockAlignSize / instBytes
 
+  // ppa
+  def NumStartPcDuplicate: Int = bpuParameters.NumStartPcDuplicate
+
   def PhrHistoryLength: Int = frontendParameters.getPhrHistoryLength
 
   def NumAheadBtbPredictionEntries: Int = bpuParameters.abtbParameters.NumWays
 
-  def NumBtbResultEntries: Int = bpuParameters.mbtbParameters.NumWay * bpuParameters.mbtbParameters.NumAlignBanks
+  def NumBtbAlignBanks:    Int = FetchBlockSize / FetchBlockAlignSize
+  def NumBtbResultEntries: Int = bpuParameters.mbtbParameters.NumWay * NumBtbAlignBanks
 
-  def GhrShamt:         Int = NumBtbResultEntries
-  def GhrHistoryLength: Int = bpuParameters.scParameters.GlobalTableInfos.map(_.HistoryLength).max
-  def BWHistoryLength:  Int = bpuParameters.scParameters.BackwardTableInfos.map(_.HistoryLength).max
+  def GhrShamt:          Int = NumBtbResultEntries
+  def GhrHistoryLength:  Int = bpuParameters.scParameters.GlobalTableInfos.map(_.HistoryLength).max
+  def BWHistoryLength:   Int = bpuParameters.scParameters.BackwardTableInfos.map(_.HistoryLength).max
+  def ImliHistoryLength: Int = bpuParameters.scParameters.ImliTableInfo.HistoryLength
+
+  def CompareAddrLowWidth: Int = bpuParameters.mbtbParameters.TargetWidth
 
   // phr history
   def AllFoldedHistoryInfo: Set[FoldedHistoryInfo] =
@@ -80,7 +89,7 @@ trait HasBpuParameters extends HasFrontendParameters {
         _.getFoldedHistoryInfoSet(bpuParameters.ittageParameters.TagWidth, bpuParameters.ittageParameters.NumBanks)
       }.reduce(_ ++ _) ++
       bpuParameters.scParameters.PathTableInfos.map {
-        _.getFoldedHistoryInfoSet(NumBtbResultEntries, bpuParameters.scParameters.NumBanks)
+        _.getFoldedHistoryInfoSet()
       }.reduce(_ ++ _) ++
       bpuParameters.utageParameters.TableInfos.map {
         _.getFoldedHistoryInfoSet()

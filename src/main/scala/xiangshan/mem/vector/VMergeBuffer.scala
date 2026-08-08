@@ -33,11 +33,11 @@ import xiangshan.backend.fu.vector.Bundles.VType
 import xiangshan.mem._
 import xiangshan.mem.Bundles._
 
-class MBufferBundle(implicit p: Parameters) extends VLSUBundle{
+class MBufferBundle(isVStore: Boolean=false)(implicit p: Parameters) extends VLSUBundle{
   val data             = UInt(VLEN.W)
   val mask             = UInt(VLENB.W)
   val flowNum          = UInt(flowIdxBits.W)
-  val exceptionVec     = ExceptionVec()
+  val exceptionVec     = ExceptSparseVec((if (isVStore) VstuCfg else VlduCfg).exceptionOut)
   val uop              = new DynInst
   // val vdOffset         = UInt(vOffsetBits.W)
   val sourceType       = VSFQFeedbackType()
@@ -74,11 +74,14 @@ abstract class BaseVMergeBuffer(isVStore: Boolean=false)(implicit p: Parameters)
   val pipeWidth = io.fromPipeline.length
   lazy val fuCfg = if (isVStore) VstuCfg else VlduCfg
 
+  private def isOlder(left: VecPipelineFeedbackIO, right: VecPipelineFeedbackIO): Bool = {
+    left.elemIdx < right.elemIdx
+  }
   def EnqConnect(source: MergeBufferReq, sink: MBufferBundle) = {
     sink.data         := source.data
     sink.mask         := source.mask
     sink.flowNum      := source.flowNum
-    sink.exceptionVec := ExceptionNO.selectByFu(0.U.asTypeOf(ExceptionVec()), fuCfg)
+    sink.exceptionVec.zeroInit()
     sink.uop          := source.uop
     sink.sourceType   := 0.U.asTypeOf(VSFQFeedbackType())
     sink.flushState   := false.B
@@ -101,7 +104,7 @@ abstract class BaseVMergeBuffer(isVStore: Boolean=false)(implicit p: Parameters)
     sink.vecWen.foreach(_ := source.uop.vecWen)
     sink.v0Wen.foreach(_ := source.uop.v0Wen)
     sink.vlWen.foreach(_ := source.uop.vlWen)
-    sink.exceptionVec.foreach(_ := ExceptionNO.selectByFu(source.exceptionVec, fuCfg))
+    sink.exceptionVec extendFrom source.exceptionVec
     sink.flushPipe.foreach(_ := source.uop.flushPipe)
     sink.replay.foreach(_ := source.uop.replayInst)
     sink.lqIdx.foreach(_ := source.uop.lqIdx)
@@ -128,26 +131,32 @@ abstract class BaseVMergeBuffer(isVStore: Boolean=false)(implicit p: Parameters)
   }
   def ToLsqConnect(source: MBufferBundle): FeedbackToLsqIO = {
     val sink                                 = WireInit(0.U.asTypeOf(new FeedbackToLsqIO))
-    val hasExp                               = ExceptionNO.selectByFu(source.exceptionVec, fuCfg).asUInt.orR
+    val hasExp                               = source.exceptionVec.orR
     sink.robidx                             := source.uop.robIdx
     sink.uopidx                             := source.uop.uopIdx
-    sink.sqIdx                              := source.uop.sqIdx
-    sink.lqIdx                              := source.uop.lqIdx
     sink.feedback(VecFeedbacks.COMMIT)      := !hasExp
     sink.feedback(VecFeedbacks.FLUSH)       := hasExp
     sink.feedback(VecFeedbacks.LAST)        := true.B
+    sink
+  }
+
+  def toExceptionGenConnect(source: MBufferBundle): MemExceptionInfo = {
+    val sink                                 = WireInit(0.U.asTypeOf(new MemExceptionInfo))
+    sink.robIdx                             := source.uop.robIdx
+    sink.uopIdx                             := source.uop.uopIdx
     sink.vstart                             := source.vstart // TODO: if lsq need vl for fof?
     sink.vaddr                              := source.vaddr
     sink.vaNeedExt                          := source.vaNeedExt
     sink.gpaddr                             := source.gpaddr
     sink.isForVSnonLeafPTE                  := source.isForVSnonLeafPTE
     sink.vl                                 := source.vl
-    sink.exceptionVec                       := ExceptionNO.selectByFu(source.exceptionVec, fuCfg)
+    sink.exceptionVec               extendFrom source.exceptionVec
+    sink.isHyper                            := false.B
     sink
   }
 
 
-  val entries      = Reg(Vec(uopSize, new MBufferBundle))
+  val entries      = Reg(Vec(uopSize, new MBufferBundle(isVStore)))
   val needCancel   = WireInit(VecInit(Seq.fill(uopSize)(false.B)))
   val allocated    = RegInit(VecInit(Seq.fill(uopSize)(false.B)))
   val freeMaskVec  = WireInit(VecInit(Seq.fill(uopSize)(false.B)))
@@ -229,35 +238,6 @@ abstract class BaseVMergeBuffer(isVStore: Boolean=false)(implicit p: Parameters)
     dontTouch(mergedByPrevPortVec)
   }
 
-  // for exception, select exception, when multi port writeback exception, we need select oldest one
-  def selectOldest[T <: VecPipelineFeedbackIO](valid: Seq[Bool], bits: Seq[T], sel: Seq[UInt]): (Seq[Bool], Seq[T], Seq[UInt]) = {
-    assert(valid.length == bits.length)
-    assert(valid.length == sel.length)
-    if (valid.length == 0 || valid.length == 1) {
-      (valid, bits, sel)
-    } else if (valid.length == 2) {
-      val res = Seq.fill(2)(Wire(ValidIO(chiselTypeOf(bits(0)))))
-      for (i <- res.indices) {
-        res(i).valid := valid(i)
-        res(i).bits := bits(i)
-      }
-      val oldest = Mux(valid(0) && valid(1),
-        Mux(sel(0) < sel(1),
-            res(0), res(1)),
-        Mux(valid(0) && !valid(1), res(0), res(1)))
-
-      val oldidx = Mux(valid(0) && valid(1),
-        Mux(sel(0) < sel(1),
-          sel(0), sel(1)),
-        Mux(valid(0) && !valid(1), sel(0), sel(1)))
-      (Seq(oldest.valid), Seq(oldest.bits), Seq(oldidx))
-    } else {
-      val left  = selectOldest(valid.take(valid.length / 2), bits.take(bits.length / 2), sel.take(sel.length / 2))
-      val right = selectOldest(valid.takeRight(valid.length - (valid.length / 2)), bits.takeRight(bits.length - (bits.length / 2)), sel.takeRight(sel.length - (sel.length / 2)))
-      selectOldest(left._1 ++ right._1, left._2 ++ right._2, left._3 ++ right._3)
-    }
-  }
-
   val pipeValid        = io.fromPipeline.map(_.valid)
   val pipeBits         = io.fromPipeline.map(_.bits)
   val pipeValidReg     = io.fromPipeline.map(x => RegNext(x.valid))
@@ -270,34 +250,39 @@ abstract class BaseVMergeBuffer(isVStore: Boolean=false)(implicit p: Parameters)
   val portHasExcp       = mergePortMatrixHasExcpWrap.map{_.reduce(_ || _)}
 
   for(i <- io.fromPipeline.indices){
+    val selectModule        = Module(new SelectOldest(io.fromPipeline.head.bits.cloneType, pipeWidth, isOlder).suggestName(s"selectModule_${i}"))
     val pipewbvalid         = if(isVStore) pipeValid(i) else pipeValidReg(i)
     val pipewb              = if(isVStore) pipeBits(i)  else pipeBitsReg(i)
     val pipeWbMbIndex       = pipewb.mBIndex
     val entry               = entries(pipeWbMbIndex)
     val entryVeew           = entry.uop.vpu.veew
     val entryIsUS           = LSUOpType.isAllUS(entry.uop.fuOpType)
-    val entryHasException   = ExceptionNO.selectByFu(entry.exceptionVec, fuCfg).asUInt.orR || TriggerAction.isDmode(entry.uop.trigger)
+    val entryHasException   = entry.exceptionVec.orR || TriggerAction.isDmode(entry.uop.trigger)
     val entryExcp           = entryHasException && entry.mask.orR
     val entryVaddr          = entry.vaddr
     val entryVstart         = entry.vstart
     val entryElemIdx        = entry.elemIdx
 
-    val sel                    = selectOldest(mergePortMatrixHasExcpWrap(i), selBits, wbElemIdx)
-    val selPort                = sel._2
-    val selElemInfield         = selPort(0).elemIdx & (entries(pipeWbMbIndex).vlmax - 1.U)
-    val selExceptionVec        = selPort(0).exceptionVec
-    val selVaddr               = selPort(0).vaddr
-    val selElemIdx             = selPort(0).elemIdx
+    selectModule.io.in.zipWithIndex.map{case (sink, j) =>
+      sink.valid := mergePortMatrixHasExcpWrap(i)(j)
+      sink.bits  := selBits(j)
+    }
 
-    val isUSFirstUop           = !selPort(0).elemIdx.orR
+    val selPort                = selectModule.io.out.bits
+    val selElemInfield         = selPort.elemIdx & (entries(pipeWbMbIndex).vlmax - 1.U)
+    val selExceptionVec        = selPort.exceptionVec
+    val selVaddr               = selPort.vaddr
+    val selElemIdx             = selPort.elemIdx
+
+    val isUSFirstUop           = !selPort.elemIdx.orR
     // Only the first unaligned uop of unit-stride needs to be offset.
     // When unaligned, the lowest bit of mask is 0.
     //  example: 16'b1111_1111_1111_0000
-    val firstUnmask            = genVFirstUnmask(selPort(0).mask).asUInt
+    val firstUnmask            = genVFirstUnmask(selPort.mask).asUInt
     val addrOffset             = Mux(entryIsUS, firstUnmask, 0.U)
     val vaddr                  = selVaddr + addrOffset
-    val gpaddr                 = selPort(0).gpaddr + addrOffset
-    val vstart                 = Mux(entryIsUS, selPort(0).vstart, selElemInfield)
+    val gpaddr                 = selPort.gpaddr + addrOffset
+    val vstart                 = Mux(entryIsUS, selPort.vstart, selElemInfield)
 
     // select oldest port to raise exception
     when((((entryElemIdx >= selElemIdx) && entryExcp && portHasExcp(i)) || (!entryExcp && portHasExcp(i))) && pipewbvalid && !mergedByPrevPortVecWrap(i)) {
@@ -305,12 +290,12 @@ abstract class BaseVMergeBuffer(isVStore: Boolean=false)(implicit p: Parameters)
       when(!entry.fof || vstart === 0.U){
         // For fof loads, if element 0 raises an exception, vl is not modified, and the trap is taken.
         entry.vstart       := vstart
-        entry.exceptionVec := ExceptionNO.selectByFu(selExceptionVec, fuCfg)
-        entry.uop.trigger     := selPort(0).trigger
+        entry.exceptionVec := selExceptionVec
+        entry.uop.trigger  := selPort.trigger
         entry.vaddr        := vaddr
-        entry.vaNeedExt    := selPort(0).vaNeedExt
+        entry.vaNeedExt    := selPort.vaNeedExt
         entry.gpaddr       := gpaddr
-        entry.isForVSnonLeafPTE := selPort(0).isForVSnonLeafPTE
+        entry.isForVSnonLeafPTE := selPort.isForVSnonLeafPTE
       }.otherwise{
         entry.vl           := Mux(entry.vl < vstart, entry.vl, vstart)
       }
@@ -322,7 +307,7 @@ abstract class BaseVMergeBuffer(isVStore: Boolean=false)(implicit p: Parameters)
     val wbIndex          = pipewb.bits.mBIndex
     val flowNumOffset    = PopCount(mergePortMatrix(i))
     val sourceTypeNext   = entries(wbIndex).sourceType | pipewb.bits.sourceType
-    val hasExp           = ExceptionNO.selectByFu(pipewb.bits.exceptionVec, fuCfg).asUInt.orR
+    val hasExp           = pipewb.bits.exceptionVec.orR
 
     // if is VLoad, need latch 1 cycle to merge data. only flowNum and wbIndex need to latch
     val latchWbValid     = if(isVStore) pipewb.valid else RegNext(pipewb.valid)
@@ -354,7 +339,7 @@ abstract class BaseVMergeBuffer(isVStore: Boolean=false)(implicit p: Parameters)
    val selPolicy = SelectOne("circ", uopFinish, deqWidth) // select one entry to deq
    private val pipelineOut              = Wire(Vec(deqWidth, DecoupledIO(new ExuOutput(param))))
    private val writeBackOut             = Wire(Vec(deqWidth, DecoupledIO(new ExuOutput(param))))
-   private val writeBackOutExceptionVec = writeBackOut.map(_.bits.exceptionVec.get)
+   private val writeBackOutExceptionVec = writeBackOut.map(_.bits.exceptionVec)
    for(((port, lsqport), i) <- (pipelineOut zip io.toLsq).zipWithIndex){
     val canGo    = port.ready
     val (selValid, selOHVec) = selPolicy.getNthOH(i + 1)
@@ -374,6 +359,9 @@ abstract class BaseVMergeBuffer(isVStore: Boolean=false)(implicit p: Parameters)
     //to lsq
     lsqport.bits := ToLsqConnect(selEntry) // when uopwriteback, free MBuffer entry, write to lsq
     lsqport.valid:= selFire && selAllocated && !needRSReplay(entryIdx)
+    //to exceptionGen
+    io.exceptionInfo(i).bits  := toExceptionGenConnect(selEntry)
+    io.exceptionInfo(i).valid := selFire && selAllocated && !needRSReplay(entryIdx)
     //to RS
     val feedbackOut                       = WireInit(0.U.asTypeOf(io.feedback(i).bits)).suggestName(s"feedbackOut_${i}")
     val feedbackValid                     = selFire && selAllocated
@@ -396,7 +384,7 @@ abstract class BaseVMergeBuffer(isVStore: Boolean=false)(implicit p: Parameters)
       Option(s"VMergebufferPipelineConnect${i}")
     )
      io.uopWriteback(i)                  <> writeBackOut(i)
-     io.uopWriteback(i).bits.exceptionVec.foreach(_ := ExceptionNO.selectByFu(writeBackOutExceptionVec(i), fuCfg))
+     io.uopWriteback(i).bits.exceptionVec extendFrom writeBackOutExceptionVec(i).selectByFu(fuCfg)
    }
 
   QueuePerf(uopSize, freeList.io.validCount, freeList.io.validCount === 0.U)
@@ -425,7 +413,7 @@ class VLMergeBufferImp(implicit p: Parameters) extends BaseVMergeBuffer(isVStore
     Mux(
       TriggerAction.isExp(x.bits.trigger) || TriggerAction.isDmode(x.bits.trigger),
       ~x.bits.vecTriggerMask,
-      Fill(x.bits.mask.getWidth, !ExceptionNO.selectByFuAndUnSelect(x.bits.exceptionVec, fuCfg, Seq(breakPoint)).asUInt.orR)
+      Fill(x.bits.mask.getWidth, !x.bits.exceptionVec.unselect(breakPoint).orR)
     ).asUInt & x.bits.mask
   }
 
@@ -500,7 +488,7 @@ class VSMergeBufferImp(implicit p: Parameters) extends BaseVMergeBuffer(isVStore
     sink.vecWen.foreach(_ := source.uop.vecWen)
     sink.v0Wen.foreach(_ := source.uop.v0Wen)
     sink.vlWen.foreach(_ := source.uop.vlWen)
-    sink.exceptionVec.foreach(_ := ExceptionNO.selectByFu(source.exceptionVec, fuCfg))
+    sink.exceptionVec extendFrom source.exceptionVec
     sink.flushPipe.foreach(_ := source.uop.flushPipe)
     sink.replay.foreach(_ := source.uop.replayInst)
     sink.lqIdx.foreach(_ := source.uop.lqIdx)

@@ -71,7 +71,7 @@ class MainBtbInternalBank(
       val req: Valid[Req] = Flipped(Valid(new Req))
     }
 
-    val resetDone: Bool = Output(Bool())
+    val sramResetDone: Bool = Output(Bool())
 
     val read:         Read         = new Read
     val writeEntry:   WriteEntry   = new WriteEntry
@@ -132,11 +132,7 @@ class MainBtbInternalBank(
     flow = true
   ))
 
-  private val resetDone = RegInit(false.B)
-  when(entrySrams.map(_.io.r.req.ready).reduce(_ && _) && counterSram.io.r.req.ready) {
-    resetDone := true.B
-  }
-  io.resetDone := resetDone
+  io.sramResetDone := entrySrams.map(_.io.resetDone).reduce(_ && _) && counterSram.io.resetDone
 
   /* *** sram -> io *** */
   // handle entry & counter together
@@ -198,9 +194,7 @@ class MainBtbInternalBank(
   counterWriteBuffer.io.enq.bits.wayMask  := writeCounter.req.bits.wayMask
   counterWriteBuffer.io.enq.bits.counters := writeCounter.req.bits.counters
 
-  private val perf_entryDropWrite = (0 until NumWay).map { i =>
-    writeEntry.req.valid && writeEntry.req.bits.wayMask(i) && !entryWriteBuffer.io.write(i).ready
-  }.reduce(_ || _)
+  private val perfEntryOverwrite = entryWriteBuffer.io.overwrite.reduce(_ || _)
 
   XSPerfAccumulate(
     "multihit_write_conflict",
@@ -213,7 +207,7 @@ class MainBtbInternalBank(
     !counterWriteBuffer.io.enq.ready && counterWriteBuffer.io.enq.valid
   )
   XSPerfAccumulate(
-    "entry_writebuffer_drop_write",
-    perf_entryDropWrite
+    "entry_writebuffer_overwrite",
+    perfEntryOverwrite
   )
 }

@@ -43,9 +43,14 @@ class VSplitPipeline(param: ExeUnitParams, isVStore: Boolean = false)(implicit p
   def us_fof(fuOpType: UInt): Bool = false.B
   //TODO vdIdxReg should no longer be useful, don't delete it for now
   val vdIdxReg = RegInit(0.U(3.W))
+  val illegalIssue = if (isVStore) {
+    !(io.in.bits.sqIdx.get + io.in.bits.numLsElem.get).withInPhysicalQueue(io.sqDeqPtr.get) //TODO: this check will be remove in the future.
+  } else {
+    false.B
+  } // will be remove in the future.
 
   val s1_ready = WireInit(false.B)
-  io.in.ready := s1_ready
+  io.in.ready := s1_ready && !illegalIssue
 
   /**-----------------------------------------------------------
     * s0 stage
@@ -67,7 +72,7 @@ class VSplitPipeline(param: ExeUnitParams, isVStore: Boolean = false)(implicit p
   val s0_nfield        = s0_nf +& 1.U
 
   val s0_valid         = Wire(Bool())
-  val s0_kill          = io.in.bits.robIdx.needFlush(io.redirect)
+  val s0_kill          = io.in.bits.robIdx.needFlush(io.redirect) || illegalIssue
   val s0_can_go        = s1_ready
   val s0_fire          = s0_valid && s0_can_go
   val s0_out           = Wire(new VLSBundle(isVStore))
@@ -386,7 +391,7 @@ abstract class VSplitBuffer(isVStore: Boolean = false)(implicit p: Parameters) e
   io.out.bits match { case x =>
     x.uop                   := issueUop
     x.uop.imm               := 0.U
-    x.uop.exceptionVec      := ExceptionNO.selectByFu(issueUop.exceptionVec, fuCfg)
+    x.uop.exceptionVec extendFrom issueUop.exceptionVec.selectByFu(fuCfg)
     x.vaddr                 := Mux(!issuePreIsSplit, usSplitVaddr, vaddr)
     x.basevaddr             := issueBaseAddr
     x.alignedType           := issueAlignedType
@@ -463,11 +468,7 @@ abstract class VSplitBuffer(isVStore: Boolean = false)(implicit p: Parameters) e
 }
 
 class VSSplitBufferImp(implicit p: Parameters) extends VSplitBuffer(isVStore = true){
-  override lazy val misalignedCanGo = io.vstdMisalign.get.storePipeEmpty &&
-    (io.vstdMisalign.get.storeMisalignBufferEmpty ||
-      io.vstdMisalign.get.storeMisalignBufferRobIdx > io.out.bits.uop.robIdx ||
-      io.vstdMisalign.get.storeMisalignBufferRobIdx === io.out.bits.uop.robIdx &&
-        io.vstdMisalign.get.storeMisalignBufferUopIdx > io.out.bits.uop.uopIdx)
+  override lazy val misalignedCanGo = true.B
 
   // split data
   val splitData = genVSData(
@@ -489,7 +490,7 @@ class VSSplitBufferImp(implicit p: Parameters) extends VSplitBuffer(isVStore = t
   vstd.bits.fuType := FuType.vstu.U
   vstd.bits.fuOpType := issueUop.fuOpType
   vstd.bits.data := Mux(!issuePreIsSplit, usSplitData, flowData)
-  vstd.bits.vecDebug := DontCare
+  vstd.bits.vecDebug.foreach(_ := DontCare)
 
   if(env.EnableDifftest){
     val usVaddrOffset   = LookupTree(issueEew, List(
@@ -499,8 +500,8 @@ class VSSplitBufferImp(implicit p: Parameters) extends VSplitBuffer(isVStore = t
       "b11".U -> issueUopAddr(2, 0)
     ))
 
-    vstd.bits.vecDebug.start  := Mux(splitIdx === 0.U, usVaddrOffset, 0.U)// for unaligned store event
-    vstd.bits.vecDebug.offset := usVaddrOffset
+    vstd.bits.vecDebug.foreach(_.start  := Mux(splitIdx === 0.U, usVaddrOffset, 0.U))// for unaligned store event
+    vstd.bits.vecDebug.foreach(_.offset := usVaddrOffset)
   }
 
 }
@@ -554,6 +555,7 @@ class VSSplitImp(val param: ExeUnitParams)(implicit p: Parameters) extends VLSUM
   val splitBuffer = Module(new VSSplitBufferImp())
   // Split Pipeline
   splitPipeline.io.in <> io.in
+  splitPipeline.io.sqDeqPtr.get := io.sqDeqPtr.get
   splitPipeline.io.redirect <> io.redirect
   io.toMergeBuffer <> splitPipeline.io.toMergeBuffer
 
@@ -568,7 +570,4 @@ class VSSplitImp(val param: ExeUnitParams)(implicit p: Parameters) extends VLSUM
   splitBuffer.io.redirect <> io.redirect
   io.out <> splitBuffer.io.out
   io.vstd.get <> splitBuffer.io.vstd.get
-
-  io.vstdMisalign.get <> splitBuffer.io.vstdMisalign.get
 }
-

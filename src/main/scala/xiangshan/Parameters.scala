@@ -18,8 +18,8 @@ package xiangshan
 
 import chisel3._
 import chisel3.util._
-import coupledL2._
-import coupledL2.tl2chi._
+import xscache.coupledL2._
+import xscache.chi._
 import freechips.rocketchip.diplomacy.AddressSet
 import freechips.rocketchip.tile.MaxHartIdBits
 import org.chipsalliance.cde.config.{Field, Parameters}
@@ -53,6 +53,10 @@ case class XSCoreParameters
   VLEN: Int = 128,
   ELEN: Int = 64,
   HSXLEN: Int = 64,
+  HasMptCheck: Boolean = false, //enable mpt
+  HasMptCheckDefault: Boolean = false, // hardwired testing code: fake 2M MPT table
+  HasMptCheckDefault4k: Boolean = false, // hardwired testing code: fake 4k MPT table
+  HasMptInodeOpt: Boolean = false, // hardwired testing code: skip mpt check for non-leaf ptw nodes
   HasBitmapCheck: Boolean = true,
   HasBitmapCheckDefault: Boolean = false,
   HasMExtension: Boolean = true,
@@ -70,6 +74,7 @@ case class XSCoreParameters
   HasVPU: Boolean = true,
   HasCustomCSRCacheOp: Boolean = true,
   AsidLength: Int = 16,
+  SdidLength: Int = 6,
   VmidLength: Int = 14,
   EnbaleTlbDebug: Boolean = false,
   EnableClockGate: Boolean = true,
@@ -96,16 +101,18 @@ case class XSCoreParameters
   V0_IDX: Int = 0,
   Vl_IDX: Int = 0,
   NRPhyRegs: Int = 192,
-  VirtualLoadQueueSize: Int = 72,
-  LoadQueueRARSize: Int = 72,
-  LoadQueueRAWSize: Int = 32, // NOTE: make sure that LoadQueueRAWSize is power of 2.
+  VirtualLoadQueueSize: Int = 120,
+  LoadQueueRARSize: Int = 96,
+  LoadQueueRAWSize: Int = 56, // NOTE: make sure that LoadQueueRAWSize is power of 2.
   RollbackGroupSize: Int = 8,
-  LoadQueueReplaySize: Int = 72,
+  LoadQueueReplaySize: Int = 120,
+  LoadDependenceScoreBoardWidth: Int = 4,
   LoadUncacheBufferSize: Int = 16,
   LoadQueueNWriteBanks: Int = 8, // NOTE: make sure that LoadQueueRARSize/LoadQueueRAWSize is divided by LoadQueueNWriteBanks
-  StoreQueueSize: Int = 56,
-  StoreQueueNWriteBanks: Int = 8, // NOTE: make sure that StoreQueueSize is divided by StoreQueueNWriteBanks
-  StoreQueueForwardWithMask: Boolean = true,
+  StoreQueuePhysicalSize: Int = 64, // preferably a power of 2
+  StoreQueueMultiple: Int = 2, // preferably a power of 2
+  StoreQueueSnapshotInterval: Int = 1, // must a power of 2
+  SQUnalignQueueSize: Int = 2,
   VlsQueueSize: Int = 8,
   RobSize: Int = 352,
   RabSize: Int = 352,
@@ -113,6 +120,7 @@ case class XSCoreParameters
   IssueQueueSize: Int = 20,
   IssueQueueCompEntrySize: Int = 12,
   EnableBackendV2Config: Boolean = false,
+  EnableDispatchIQBalanceOpt: Boolean = true,
   intPreg: PregParams = IntPregParams(
     numEntries = 224,
     numBank    = 4,
@@ -143,11 +151,19 @@ case class XSCoreParameters
     numRead    = None,
     numWrite   = None,
   ),
-  IntRegCacheSize: Int = 16,
+  IntRegCacheSize: Int = 24,
   MemRegCacheSize: Int = 12,
   intSchdVlWbPort: Int = 0,
   vfSchdVlWbPort: Int = 1,
-  prefetcher: Seq[PrefetcherParams] = Seq(StreamStrideParams(), BertiParams(), SMSParams()),
+  /**
+    * NOTE:
+    *   1. The prefetch priority is from high to low according to the order in the Seq.
+    *   2. Add BertiParams() will enable Berti and Stride will be closed by default.
+    *      If you want to enable both Berti and Stride prefetcher,
+    *      please set constant "modeStrideBerti" in PrefetcherWrapper.scala to "bothOn".
+    *      TODO: separate Stream and Stride prefetcher in the future.
+    */
+  prefetcher: Seq[PrefetcherParams] = Seq(StreamStrideParams(), SMSParams()),
   IfuRedirectNum: Int = 1,
   LoadPipelineWidth: Int = 3,
   StorePipelineWidth: Int = 2,
@@ -160,7 +176,7 @@ case class XSCoreParameters
   VecMemUnitStrideMaxFlowNum: Int = 2,
   VecMemLSQEnqIteratorNumberSeq: Seq[Int] = Seq(16, 16, 16, 16, 16, 16),
   StoreBufferSize: Int = 16,
-  StoreBufferThreshold: Int = 7,
+  StoreBufferThreshold: Int = 9,
   EnsbufferWidth: Int = 2,
   LoadDependencyWidth: Int = 2,
   // ============ VLSU ============
@@ -276,8 +292,8 @@ case class XSCoreParameters
     name = "l2",
     ways = 8,
     sets = 1024, // default 512KB L2
-    prefetch = Seq(coupledL2.prefetch.PrefetchReceiverParams(), coupledL2.prefetch.BOPParameters(),
-      coupledL2.prefetch.TPParameters()),
+    prefetch = Seq(xscache.coupledL2.prefetch.PrefetchReceiverParams(), xscache.coupledL2.prefetch.BOPParameters(),
+      xscache.coupledL2.prefetch.TPParameters()),
   )),
   L2NBanks: Int = 1,
   usePTWRepeater: Boolean = false,
@@ -292,10 +308,10 @@ case class XSCoreParameters
     "i", "m", "a", "f", "d", "c", /* "b", */ "v", "h",
     // multi-letter extensions, sorted alphanumerically
     "sdtrig", "sha", "shcounterenw", "shgatpa", "shlcofideleg", "shtvala", "shvsatpa", "shvstvala",
-    "shvstvecd", "smaia", "smcntrpmf", "smcsrind", "smdbltrp", "smmpm", "smnpm", "smrnmi", "smstateen",
-    "ss1p13", "ssaia", "ssccptr", "sscofpmf", "sscounterenw", "sscsrind", "ssdbltrp", "ssnpm",
+    "shvstvecd", "smaia", "smcdeleg", "smcntrpmf", "smcsrind", "smdbltrp", "smmpm", "smnpm", "smrnmi", "smstateen",
+    "ss1p13", "ssaia", "ssccfg", "ssccptr", "sscofpmf", "sscounterenw", "sscsrind", "ssdbltrp", "ssnpm",
     "sspm", "ssstateen", "ssstrict", "sstc", "sstvala", "sstvecd", "ssu64xl", "supm", "sv39",
-    "sv48", "svade", "svbare", "svinval", "svnapot", "svpbmt", "za64rs", "zacas", "zawrs", "zba",
+    "sv48", "svade", "svbare", "svinval", "svnapot", "svpbmt", "za64rs", "zabha", "zacas", "zawrs", "zba",
     "zbb", "zbc", "zbkb", "zbkc", "zbkx", "zbs", "zcb", "zcmop", "zfa", "zfh", "zfhmin", "zic64b",
     "zicbom", "zicbop", "zicboz", "ziccamoa", "ziccif", "zicclsm", "ziccrse", "zicntr", "zicond",
     "zicsr", "zifencei", "zihintntl", "zihintpause", "zihpm", "zimop", "zkn", "zknd", "zkne", "zknh",
@@ -304,7 +320,7 @@ case class XSCoreParameters
 
   def vlWidth = log2Up(VLEN) + 1
 
-  /* 
+  /*
     Top-Down, ExecutionStall used
   */
   def fewUops = 4
@@ -517,6 +533,7 @@ case object DebugOptionsKey extends Field[DebugOptions]
 case class DebugOptions
 (
   FPGAPlatform: Boolean = false,
+  DumpCSR: Boolean = false,
   ResetGen: Boolean = false,
   EnableDifftest: Boolean = false,
   AlwaysBasicDiff: Boolean = true,
@@ -524,6 +541,7 @@ case class DebugOptions
   EnablePerfDebug: Boolean = true,
   PerfLevel: String = "VERBOSE",
   EnableXMR: Boolean = true,
+  SimMemSize: Long = 8190L * 1024 * 1024 * 1024, // same as PMA, (0x80000000L, 0x80000000000L)
   UseDRAMSim: Boolean = false,
   EnableConstantin: Boolean = false,
   EnableChiselDB: Boolean = false,
@@ -563,10 +581,14 @@ trait HasXSParameter {
   val fLen = 64
   def hartIdLen = p(MaxHartIdBits)
   val xLen = XLEN
-
+  assert(!(HasMptCheck == true && HasBitmapCheck == true), "Conflicts: MPT and Bitmap can't be used together")
+  def HasMptCheck = coreParams.HasMptCheck && !coreParams.HasBitmapCheck
+  def HasMptCheckDefault = coreParams.HasMptCheckDefault
+  def HasMptCheckDefault4k = coreParams.HasMptCheckDefault4k
+  def HasMptInodeOpt = coreParams.HasMptInodeOpt
   def HasBitmapCheck = coreParams.HasBitmapCheck
   def HasBitmapCheckDefault = coreParams.HasBitmapCheckDefault
-  
+
   /** prefetch config */
   def prefetcherSeq = coreParams.prefetcher
   def prefetcherNum = max(prefetcherSeq.size, 1) //TODO lyq: 1 for simpler code generation, but it's also ugly
@@ -613,7 +635,7 @@ trait HasXSParameter {
       coreParams.VAddrBitsSv39 max coreParams.GPAddrBitsSv39x4
     }
   }
-
+  def SdidLength = coreParams.SdidLength
   def AsidLength = coreParams.AsidLength
   def VmidLength = coreParams.VmidLength
   def ReSelectLen = coreParams.ReSelectLen
@@ -693,14 +715,17 @@ trait HasXSParameter {
   val RAWlgSelectGroupSize = log2Ceil(RollbackGroupSize)
   val RAWTotalDelayCycles = scala.math.ceil(log2Ceil(LoadQueueRAWSize).toFloat / RAWlgSelectGroupSize).toInt + 1 - 2
   def LoadQueueReplaySize = coreParams.LoadQueueReplaySize
+  def LoadDependenceScoreBoardWidth = coreParams.LoadDependenceScoreBoardWidth
   def LoadUncacheBufferSize = coreParams.LoadUncacheBufferSize
   def LoadQueueNWriteBanks = coreParams.LoadQueueNWriteBanks
-  def StoreQueueSize = coreParams.StoreQueueSize
-  def StoreQueueForceWriteSbufferUpper = coreParams.StoreQueueSize - 4
+  def StoreQueuePhysicalSize = coreParams.StoreQueuePhysicalSize
+  def StoreQueueMultiple = coreParams.StoreQueueMultiple
+  def StoreQueueSize = StoreQueuePhysicalSize * StoreQueueMultiple
+  def StoreQueueSnapshotInterval = coreParams.StoreQueueSnapshotInterval
+  def SQUnalignQueueSize = coreParams.SQUnalignQueueSize
+  def StoreQueueForceWriteSbufferUpper = coreParams.StoreQueuePhysicalSize - 4
   def StoreQueueForceWriteSbufferLower = StoreQueueForceWriteSbufferUpper - 5
-  def VirtualLoadQueueMaxStoreQueueSize = VirtualLoadQueueSize max StoreQueueSize
-  def StoreQueueNWriteBanks = coreParams.StoreQueueNWriteBanks
-  def StoreQueueForwardWithMask = coreParams.StoreQueueForwardWithMask
+  def VirtualLoadQueueMaxStoreQueueSize = VirtualLoadQueueSize max StoreQueuePhysicalSize
   def VlsQueueSize = coreParams.VlsQueueSize
 
   def MemIQSizeMax = backendParams.intSchdParams.get.issueBlockParams.map(_.numEntries).max
@@ -746,7 +771,14 @@ trait HasXSParameter {
   def EnableAtCommitMissTrigger = coreParams.EnableAtCommitMissTrigger
   def EnableStorePrefetchSMS = coreParams.EnableStorePrefetchSMS
   def EnableStorePrefetchSPB = coreParams.EnableStorePrefetchSPB
-  def HasCMO = coreParams.HasCMO && p(EnableCHI)
+  def MissReqPortCount = {
+    if (EnableStorePrefetchAtCommit || EnableStorePrefetchAtIssue || EnableStorePrefetchSPB) {
+      1 + backendParams.LduCnt + backendParams.StaCnt
+    } else {
+      1 + backendParams.LduCnt
+    }
+  }
+  def HasCMO = coreParams.HasCMO
   require(LoadPipelineWidth == backendParams.LdExuCnt, "LoadPipelineWidth must be equal exuParameters.LduCnt!")
   require(StorePipelineWidth == backendParams.StaCnt, "StorePipelineWidth must be equal exuParameters.StuCnt!")
   def Enable3Load3Store = (LoadPipelineWidth == 3 && StorePipelineWidth == 3)
@@ -773,6 +805,7 @@ trait HasXSParameter {
   def icacheCtrlAddress = coreParams.frontendParameters.icacheParameters.ctrlUnitParameters.Address // valid only when icacheCtrlEnabled is true
 
   def dcacheParameters = coreParams.dcacheParametersOpt.getOrElse(DCacheParameters())
+  def numMemChannelsFromDcache = coreParams.dcacheParametersOpt.map(_.numMemChannels).getOrElse(1)
 
   // dcache block cacheline when lr for LRSCCycles - LRSCBackOff cycles
   // for constrained LR/SC loop
@@ -792,9 +825,10 @@ trait HasXSParameter {
   def LWTUse2BitCounter = true
   // store set parameters
   def SSITSize = WaitTableSize
-  def LFSTSize = 32
+  def LFSTSize = 64
   def SSIDWidth = log2Up(LFSTSize)
-  def LFSTWidth = 4
+  def LFSTWidth = 2
+  def strictResetPeriod = 8192
   def StoreSetEnable = true // LWT will be disabled if SS is enabled
   def LFSTEnable = true
 

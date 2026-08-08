@@ -52,8 +52,10 @@ class VirtualLoadQueue(implicit p: Parameters) extends XSModule
     val lqFull      = Output(Bool())
     val lqEmpty     = Output(Bool())
     // to dispatch
-    val lqDeq       = Output(UInt(log2Up(CommitWidth + 1).W))
-    val lqCancelCnt = Output(UInt(log2Up(VirtualLoadQueueSize+1).W))
+    val lqDeq       = ValidIO(UInt(log2Up(CommitWidth + 1).W))
+    // tolsqEnqCtrl
+    val lqRedirect  = ValidIO(new LqPtr)
+    val lqRecoverStall = Output(Bool())
     // for topdown
     val noUopsIssued = Input(Bool())
   })
@@ -92,7 +94,7 @@ class VirtualLoadQueue(implicit p: Parameters) extends XSModule
   val lastLastCycleRedirect = RegNext(lastCycleRedirect)
 
   val validCount = distanceBetween(enqPtrExt(0), deqPtr)
-  val allowEnqueue = validCount <= (VirtualLoadQueueSize - LSQLdEnqWidth).U
+  val allowEnqueue = enqPtrExt.head >= deqPtr
   val canEnqueue = io.enq.req.map(_.valid)
   val vLoadFlow = io.enq.req.map(_.bits.numLsElem.asTypeOf(UInt(elemIdxBits.W)))
   val needCancel = WireInit(VecInit((0 until VirtualLoadQueueSize).map(i => {
@@ -151,10 +153,17 @@ class VirtualLoadQueue(implicit p: Parameters) extends XSModule
   deqPtrNext := deqPtr + lastCommitCount
   deqPtr := RegEnable(deqPtrNext, 0.U.asTypeOf(new LqPtr), deqPtrUpdateEna)
 
-  io.lqDeq := GatedRegNext(lastCommitCount)
-  io.lqCancelCnt := redirectCancelCount
+  io.lqDeq.bits := GatedRegNext(lastCommitCount)
+  io.lqDeq.valid := RegNext(lastCommitCount.orR)
+  io.lqRedirect.valid := RegNext(lastLastCycleRedirect.valid)
+  io.lqRedirect.bits := RegEnable(enqPtrExtNext.head, lastLastCycleRedirect.valid)
   io.ldWbPtr := deqPtr
   io.lqEmpty := RegNext(validCount === 0.U)
+  val lqRecoverStall = io.redirect.valid || lastCycleRedirect.valid || lastLastCycleRedirect.valid
+  io.lqRecoverStall := RegNext(lqRecoverStall) // means loadqueue haven't pending redirect
+
+  XSError((enqPtrExt.head < deqPtr) &&
+  !(enqPtrExt.head.value === deqPtr.value && enqPtrExt.head.flag ^ deqPtr.flag), s"deqPtr exceed enqptr\n")
 
   /**
    * Enqueue at dispatch
@@ -188,6 +197,7 @@ class VirtualLoadQueue(implicit p: Parameters) extends XSModule
       debug_mmio(i) := false.B
       debug_paddr(i) := 0.U
     }
+    XSError(entryCanEnq && allocated(i), s"can't allocated entry twice! ${i}\n")
   }
 
   for (i <- 0 until io.enq.req.length) {
@@ -251,7 +261,7 @@ class VirtualLoadQueue(implicit p: Parameters) extends XSModule
     val need_rep = io.ldin(i).bits.rep_info.need_rep
     val need_valid = io.ldin(i).bits.updateAddrValid
     when (io.ldin(i).valid) {
-      val hasExceptions = ExceptionNO.selectByFu(io.ldin(i).bits.uop.exceptionVec, LduCfg).asUInt.orR
+      val hasExceptions = io.ldin(i).bits.uop.exceptionVec.selectByFu(LduCfg).orR
       when (!need_rep && need_valid && !io.ldin(i).bits.isvec) {
         committed(loadWbIndex) := true.B
         //  Debug info
@@ -259,18 +269,18 @@ class VirtualLoadQueue(implicit p: Parameters) extends XSModule
         debug_paddr(loadWbIndex) := io.ldin(i).bits.paddr
       }
     }
+    XSError((io.ldin(i).bits.uop.robIdx =/= robIdx(loadWbIndex)) && io.ldin(i).valid, s"writeback load robIdx missMatch! at pipeline ${i}\n")
+    XSError((!allocated(loadWbIndex) || committed(loadWbIndex)) && io.ldin(i).valid, s"writeback load invalid! at pipeline ${i}\n")
     val loadClkStart = io.ldin(i).bits.uop.perfDebugInfo.logRunStartTime
     val loadClkEnd = timer
     XSInfo(io.ldin(i).valid && !need_rep && need_valid,
-      "load hit hart %d write to lq idx %d pc 0x%x vaddr %x paddr %x mask %x forwardData %x forwardMask: %x mmio %x isvec %x clk_start %d clk_end %d clk_span %d\n",
+      "load hit hart %d write to lq idx %d pc 0x%x vaddr %x paddr %x mask %x mmio %x isvec %x clk_start %d clk_end %d clk_span %d\n",
       io.hartId,
       io.ldin(i).bits.uop.lqIdx.asUInt,
       io.ldin(i).bits.uop.pc,
       io.ldin(i).bits.vaddr,
       io.ldin(i).bits.paddr,
       io.ldin(i).bits.mask,
-      io.ldin(i).bits.forwardData.asUInt,
-      io.ldin(i).bits.forwardMask.asUInt,
       io.ldin(i).bits.mmio,
       io.ldin(i).bits.isvec,
       loadClkStart,

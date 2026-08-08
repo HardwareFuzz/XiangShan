@@ -25,6 +25,7 @@ import xiangshan._
 import xiangshan.backend.Bundles._
 import xiangshan.backend.fu.NewCSR.CsrTriggerBundle
 import xiangshan.backend.rob.RobPtr
+import xiangshan.backend.fu.FuConfig
 import xiangshan.backend.fu.PMPRespBundle
 import xiangshan.backend.fu.vector.Bundles._
 import xiangshan.backend.exu.ExeUnitParams
@@ -38,7 +39,6 @@ class VLSBundle(isVStore: Boolean=false)(implicit p: Parameters) extends VLSUBun
   val data                = UInt(VLEN.W)
   // val fof            = Bool() // fof is only used for vector loads
   val excp_eew_index      = UInt(elemIdxBits.W)
-  // val exceptionVec   = ExceptionVec() // uop has exceptionVec
   val baseAddr            = UInt(XLEN.W)
   val uopAddr             = UInt(XLEN.W)
   val stride              = UInt(VLEN.W)
@@ -102,7 +102,7 @@ class VSFQFeedback (implicit p: Parameters) extends XSBundle {
   val paddr = UInt(PAddrBits.W)
   val mmio = Bool()
   val atomic = Bool()
-  val exceptionVec = ExceptionVec()
+  val exceptionVec = ExceptSparseVec()
 }
 
 class VecPipelineFeedbackIO(isVStore: Boolean=false) (implicit p: Parameters) extends VLSUBundle {
@@ -117,7 +117,7 @@ class VecPipelineFeedbackIO(isVStore: Boolean=false) (implicit p: Parameters) ex
   val nc                   = Bool()
   val mmio                 = Bool()
   //val atomic               = Bool()
-  val exceptionVec         = ExceptionVec()
+  val exceptionVec         = ExceptSparseVec((if (isVStore) FuConfig.VstuCfg else FuConfig.VlduCfg).exceptionOut)
   val hasException         = Bool() // Active
   val vaddr                = UInt(XLEN.W)
   val vaNeedExt            = Bool()
@@ -126,11 +126,6 @@ class VecPipelineFeedbackIO(isVStore: Boolean=false) (implicit p: Parameters) ex
   val vstart               = UInt(elemIdxBits.W)
   val vecTriggerMask       = UInt((VLEN/8).W)
 
-  //val vec                  = new OnlyVecExuOutput
-   // feedback
-  val vecFeedback          = Bool()
-
-  val usSecondInv          = Bool() // only for unit stride, second flow is Invalid
   val elemIdx              = UInt(elemIdxBits.W) // element index
   val mask                 = UInt(VLENB.W)
   val alignedType          = UInt(alignTypeBits.W)
@@ -158,6 +153,55 @@ class VecPipeBundle(isVStore: Boolean=false)(implicit p: Parameters) extends VLS
   val mBIndex             = if(isVStore) UInt(vsmBindexBits.W) else UInt(vlmBindexBits.W)
   val elemIdx             = UInt(elemIdxBits.W)
   val elemIdxInsideVd     = UInt(elemIdxBits.W) // only use in unit-stride
+
+  // TODO: remove this after unifying interface with vssplit
+  def toVectorLoadIn(): VectorLoadIn = {
+    require(!isVStore)
+    val out = Wire(new VectorLoadIn())
+    out.entrance := LoadEntrance.vectorIssue.U
+    out.accessType.instrType := InstrType.vector.U
+    out.accessType.pftType := DontCare
+    out.accessType.pftCoh := DontCare
+    out.uop := uop
+    out.vaddr := vaddr
+    out.fullva := vaddr
+    out.size := alignedType
+    out.mask := mask
+    out.elemIdx.get := elemIdx
+    out.mbIndex.get := mBIndex
+    out.regOffset.get := reg_offset
+    out.elemIdxInsideVd.get := elemIdxInsideVd
+    out.vecBaseVaddr.get := DontCare
+    out.vecVaddrOffset.get := DontCare
+    out.vecTriggerMask.get := DontCare
+    out.hasROBEntry := true.B
+    out.missDbUpdated := false.B
+    out.occupySource := DontCare
+    out
+  }
+
+  def toVectorStoreIn(): VectorStoreIn = {
+    require(isVStore)
+    val out = Wire(new VectorStoreIn())
+    out.entrance := StoreEntrance.vectorIssue.U
+    out.accessType.instrType := InstrType.vector.U
+    out.accessType.isCbo := false.B
+    out.accessType.isCboNoZero := false.B
+    out.uop := uop
+    out.vaddr := vaddr
+    out.fullva := vaddr
+    out.size := alignedType
+    out.mask := mask
+    out.isFirstIssue := true.B // TODO: In new vector implement, modifications are required
+
+    out.vecBaseVaddr.get := basevaddr
+    out.usSecondInv.get := usSecondInv
+    out.elemIdx.get := elemIdx
+    out.mbIndex.get := mBIndex
+    out.vecTriggerMask.get := 0.U
+    out.vecVaddrOffset.get := 0.U
+    out
+  }
 }
 
 object VecFeedbacks {
@@ -206,17 +250,7 @@ class FeedbackToSplitIO(implicit p: Parameters) extends VLSUBundle{
 class FeedbackToLsqIO(implicit p: Parameters) extends VLSUBundle{
   val robidx = new RobPtr
   val uopidx = UopIdx()
-  val sqIdx = new SqPtr
-  val lqIdx = new LqPtr
-  val vaddr = UInt(XLEN.W)
-  val vaNeedExt = Bool()
-  val gpaddr = UInt(GPAddrBits.W)
-  val isForVSnonLeafPTE = Bool()
   val feedback = Vec(VecFeedbacks.allFeedbacks, Bool())
-    // for exception
-  val vstart           = UInt(elemIdxBits.W)
-  val vl               = UInt(elemIdxBits.W)
-  val exceptionVec     = ExceptionVec()
 
   def isFlush  = feedback(VecFeedbacks.FLUSH)
   def isCommit = feedback(VecFeedbacks.COMMIT)
@@ -233,16 +267,17 @@ class storeMisaignIO(implicit p: Parameters) extends Bundle{
 class VSplitIO(param: ExeUnitParams, isVStore: Boolean=false)(implicit p: Parameters) extends VLSUBundle{
   val redirect            = Flipped(ValidIO(new Redirect))
   val in                  = Flipped(Decoupled(new ExuInput(param, hasCopySrc = true))) // from iq
+  val sqDeqPtr            = OptionWrapper(isVStore, Input(new SqPtr))
   val toMergeBuffer       = new ToMergeBufferIO(isVStore) //to merge buffer req mergebuffer entry
   val out                 = Decoupled(new VecPipeBundle(isVStore))// to scala pipeline
   val vstd                = OptionWrapper(isVStore, Valid(new StoreQueueDataWrite))
-  val vstdMisalign        = OptionWrapper(isVStore, new storeMisaignIO)
   val threshold            = OptionWrapper(!isVStore, Flipped(ValidIO(new LqPtr)))
 }
 
 class VSplitPipelineIO(param: ExeUnitParams, isVStore: Boolean=false)(implicit p: Parameters) extends VLSUBundle{
   val redirect            = Flipped(ValidIO(new Redirect))
   val in                  = Flipped(Decoupled(new ExuInput(param, hasCopySrc = true)))
+  val sqDeqPtr            = OptionWrapper(isVStore, Input(new SqPtr))
   val toMergeBuffer       = new ToMergeBufferIO(isVStore) // req mergebuffer entry, inactive elem issue
   val out                 = Decoupled(new VLSBundle())// to split buffer
 }
@@ -252,7 +287,6 @@ class VSplitBufferIO(isVStore: Boolean=false)(implicit p: Parameters) extends VL
   val in                  = Flipped(Decoupled(new VLSBundle()))
   val out                 = Decoupled(new VecPipeBundle(isVStore))//to scala pipeline
   val vstd                = OptionWrapper(isVStore, ValidIO(new StoreQueueDataWrite))
-  val vstdMisalign        = OptionWrapper(isVStore, new storeMisaignIO)
 }
 
 class VMergeBufferIO(isVStore : Boolean=false)(implicit p: Parameters) extends VLSUBundle{
@@ -260,13 +294,14 @@ class VMergeBufferIO(isVStore : Boolean=false)(implicit p: Parameters) extends V
   val fromPipeline        = if(isVStore) Vec(StorePipelineWidth, Flipped(DecoupledIO(new VecPipelineFeedbackIO(isVStore)))) else Vec(LoadPipelineWidth, Flipped(DecoupledIO(new VecPipelineFeedbackIO(isVStore))))
   val fromSplit           = if(isVStore) Vec(VecStorePipelineWidth, new FromSplitIO) else Vec(VecLoadPipelineWidth, new FromSplitIO) // req mergebuffer entry, inactive elem issue
   val uopWriteback        = if(isVStore)  {
-    Vec(VSUopWritebackWidth, DecoupledIO(new ExuOutput(vstuParams.head))) 
+    Vec(VSUopWritebackWidth, DecoupledIO(new ExuOutput(vstuParams.head)))
   } else {
     Vec(VLUopWritebackWidth, DecoupledIO(new ExuOutput(vlduParams.head)))
   }
   val toSplit             = OptionWrapper(!isVStore, new FeedbackToSplitIO())
   val toLsq               = if(isVStore) Vec(VSUopWritebackWidth, ValidIO(new FeedbackToLsqIO)) else Vec(VLUopWritebackWidth, ValidIO(new FeedbackToLsqIO)) // for lsq deq
   val feedback            = if(isVStore) Vec(VSUopWritebackWidth, ValidIO(new RSFeedback(isVector = true))) else Vec(VLUopWritebackWidth, ValidIO(new RSFeedback(isVector = true)))//for rs replay
+  val exceptionInfo       = if(isVStore) Vec(VSUopWritebackWidth, ValidIO(new MemExceptionInfo)) else Vec(VLUopWritebackWidth, ValidIO(new MemExceptionInfo)) //for exceptionInfoGen
 
 //  val fromMisalignBuffer  = OptionWrapper(isVStore, Flipped(new StoreMaBufToVecStoreMergeBufferIO))
 }
@@ -283,15 +318,17 @@ class VSegmentUnitIO(val param: ExeUnitParams)(implicit p: Parameters) extends V
   val flush_sbuffer       = new SbufferFlushBundle
   val feedback            = ValidIO(new RSFeedback(isVector = true))
   val redirect            = Flipped(ValidIO(new Redirect))
-  val exceptionInfo       = ValidIO(new FeedbackToLsqIO)
+  val exceptionInfo       = ValidIO(new MemExceptionInfo)
   //trigger
   val fromCsrTrigger      = Input(new CsrTriggerBundle)
+  //difftest
+  val diffPmaStore        = Option.when(debugEn)(ValidIO(new DifftestPmaStoreIO))
 }
 
 class VfofDataBuffIO(val param: ExeUnitParams)(implicit p: Parameters) extends VLSUBundle{
   val redirect            = Flipped(ValidIO(new Redirect))
   val in                  = Vec(VecLoadPipelineWidth, Flipped(Decoupled(new ExuInput(param, hasCopySrc = true))))
-  val mergeUopWriteback   = Vec(VLUopWritebackWidth, Flipped(DecoupledIO(new FeedbackToLsqIO)))
+  val mergeUopWriteback   = Vec(VLUopWritebackWidth, Flipped(DecoupledIO(new MemExceptionInfo)))
 
   val uopWriteback        = DecoupledIO(new ExuOutput(param))
 }

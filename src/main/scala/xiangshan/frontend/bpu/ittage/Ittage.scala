@@ -36,8 +36,8 @@ import xiangshan.frontend.PrunedAddr
 import xiangshan.frontend.PrunedAddrInit
 import xiangshan.frontend.bpu.BasePredictor
 import xiangshan.frontend.bpu.BasePredictorIO
-import xiangshan.frontend.bpu.BpuTrain
 import xiangshan.frontend.bpu.SaturateCounter
+import xiangshan.frontend.bpu.Train
 import xiangshan.frontend.bpu.WriteBuffer
 import xiangshan.frontend.bpu.history.phr.PhrAllFoldedHistories
 
@@ -53,8 +53,6 @@ class Ittage(implicit p: Parameters) extends BasePredictor with HasIttageParamet
 
   val io: IttageIO = IO(new IttageIO)
 
-  io.resetDone := true.B // FIXME: sram read ready
-
   io.trainReady := true.B
 
   private val s0_startPc = io.startPc
@@ -69,9 +67,11 @@ class Ittage(implicit p: Parameters) extends BasePredictor with HasIttageParamet
   // Each ITTAGE table manages its own banking (NumBanks parameter); top-level only supplies PC/history.
   private val tables = TableInfos.zipWithIndex.map {
     case (info, i) =>
-      val t = Module(new IttageTable(info.Size, info.HistoryLength, TagWidth, i))
+      val t = Module(new IttageTable(i, info))
       t
   }
+
+  io.sramResetDone := tables.map(_.io.sramResetDone).reduce(_ && _)
 
   private val useAltOnNa = RegInit((1 << (UseAltOnNaWidth - 1)).U(UseAltOnNaWidth.W))
   private val tickCnt    = RegInit(TickCounter.Zero)
@@ -115,8 +115,8 @@ class Ittage(implicit p: Parameters) extends BasePredictor with HasIttageParamet
 
   private val t0_fire = io.enable && io.stageCtrl.t0_fire
 
-  private val t1_train = Wire(new BpuTrain)
-  t1_train := RegEnable(io.train, 0.U.asTypeOf(new BpuTrain), t0_fire)
+  private val t1_train = Wire(new Train)
+  t1_train := RegEnable(io.train, 0.U.asTypeOf(new Train), t0_fire)
 
   private val t1_meta = Wire(new IttageMeta)
   t1_train.meta.ittage := t1_meta
@@ -284,7 +284,7 @@ class Ittage(implicit p: Parameters) extends BasePredictor with HasIttageParamet
   ittageMeta.provider.bits     := s3_provider
   ittageMeta.altProvider.valid := s3_altProvided
   ittageMeta.altProvider.bits  := s3_altProvider
-  ittageMeta.altDiffers        := s3_providerTarget =/= s3_altProviderTarget
+  ittageMeta.altDiffers        := s3_altProvided && s3_providerTarget =/= s3_altProviderTarget
   ittageMeta.providerUsefulCnt := s3_providerUsefulCnt
   ittageMeta.providerCnt       := s3_providerCnt
   ittageMeta.altProviderCnt    := s3_altProviderCnt

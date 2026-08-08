@@ -25,10 +25,10 @@ import freechips.rocketchip.diplomacy._
 import freechips.rocketchip.interrupts._
 import freechips.rocketchip.tile.{BusErrorUnit, BusErrorUnitParams, BusErrors, MaxHartIdBits}
 import freechips.rocketchip.tilelink._
-import coupledL2.{EnableCHI, L2ParamKey, PrefetchCtrlFromCore}
-import coupledL2.tl2tl.TL2TLCoupledL2
-import coupledL2.tl2chi.{CHIIssue, PortIO, TL2CHICoupledL2, CHIAddrWidthKey, NonSecureKey}
-import huancun.BankBitsKey
+import xscache.coupledL2.{L2ParamKey, PrefetchCtrlFromCore}
+import xscache.chi.{CHIIssue, CHIAddrWidthKey, NonSecureKey, PortIO}
+import xscache.coupledL2.CoupledL2
+import xscache.common.BankBitsKey
 import system.HasSoCParameter
 import top.BusPerfMonitor
 import utility._
@@ -78,7 +78,7 @@ class L2TopInlined()(implicit p: Parameters) extends LazyModule
   val l1_xbar = TLXbar()
   val mmio_xbar = TLXbar()
   val mmio_port = TLIdentityNode() // to L3
-  val memory_port = if (enableCHI && enableL2) None else Some(TLIdentityNode())
+  val memory_port = if (enableL2) None else Some(TLIdentityNode())
   val beu = LazyModule(new BusErrorUnit(
     new XSL1BusErrors(),
     BusErrorUnitParams(soc.BEURange.base, soc.BEURange.mask.toInt + 1)
@@ -90,11 +90,12 @@ class L2TopInlined()(implicit p: Parameters) extends LazyModule
   val sep_tl_port_opt = Option.when(SeperateBus != top.SeperatedBusType.NONE)(TLTempNode())
 
   val misc_l2_pmu = BusPerfMonitor(name = "Misc_L2", enable = !debugOpts.FPGAPlatform) // l1D & l1I & PTW
-  val l2_l3_pmu = BusPerfMonitor(name = "L2_L3", enable = !debugOpts.FPGAPlatform && !enableCHI, stat_latency = true)
   val xbar_l2_buffer = TLBuffer()
 
   val enbale_tllog = !debugOpts.FPGAPlatform && debugOpts.AlwaysBasicDB
-  val l1d_logger = TLLogger(s"L2_L1D_${coreParams.HartId}", enbale_tllog)
+  val l1d_logger = Seq.tabulate(numMemChannelsFromDcache)(i =>
+    TLLogger(s"L2_L1D_${coreParams.HartId}_ch$i", enbale_tllog)
+  )
   val l1i_logger = TLLogger(s"L2_L1I_${coreParams.HartId}", enbale_tllog)
   val ptw_logger = TLLogger(s"L2_PTW_${coreParams.HartId}", enbale_tllog)
   val ptw_to_l2_buffer = LazyModule(new TLBuffer)
@@ -109,14 +110,21 @@ class L2TopInlined()(implicit p: Parameters) extends LazyModule
 
   println(s"enableCHI: ${enableCHI}")
   val l2cache = if (enableL2) {
+    val sliceCoherentClientMap =
+      if (coreParams.dcacheParametersOpt.exists(p => p.numMemChannels == 2 && p.channelSelByAddr) &&
+          coreParams.L2NBanks % 2 == 0) {
+        Some(Seq.tabulate(coreParams.L2NBanks)(i => i % 2))
+      } else {
+        None
+      }
     val config = new Config((_, _, _) => {
       case L2ParamKey => coreParams.L2CacheParamsOpt.get.copy(
         hartId = p(XSCoreParamsKey).HartId,
         FPGAPlatform = debugOpts.FPGAPlatform,
         hasMbist = hasMbist,
-        PrivateClintRange = if(UsePrivateClint) Some(TIMERRange) else None
+        PrivateClintRange = if(UsePrivateClint) Some(TIMERRange) else None,
+        sliceCoherentClientMap = sliceCoherentClientMap
       )
-      case EnableCHI => p(EnableCHI)
       case CHIIssue => p(CHIIssue)
       case CHIAddrWidthKey => p(CHIAddrWidthKey)
       case NonSecureKey => p(NonSecureKey)
@@ -125,8 +133,7 @@ class L2TopInlined()(implicit p: Parameters) extends LazyModule
       case LogUtilsOptionsKey => p(LogUtilsOptionsKey)
       case PerfCounterOptionsKey => p(PerfCounterOptionsKey)
     })
-    if (enableCHI) Some(LazyModule(new TL2CHICoupledL2()(new Config(config))))
-    else Some(LazyModule(new TL2TLCoupledL2()(new Config(config))))
+    Some(LazyModule(new CoupledL2()(new Config(config))))
   } else None
   val l2_binder = coreParams.L2CacheParamsOpt.map(_ => BankBinder(coreParams.L2NBanks, 64))
 
@@ -135,13 +142,8 @@ class L2TopInlined()(implicit p: Parameters) extends LazyModule
   l2cache match {
     case Some(l2) =>
       l2_binder.get :*= l2.node :*= xbar_l2_buffer :*= l1_xbar :=* misc_l2_pmu
-      l2 match {
-        case l2: TL2TLCoupledL2 =>
-          memory_port.get := l2_l3_pmu := TLClientsMerger() := TLXbar() :=* l2_binder.get
-        case l2: TL2CHICoupledL2 =>
-          l2.managerNode := TLXbar() :=* l2_binder.get
-          l2.mmioNode := mmio_port
-      }
+      l2.managerNode := TLXbar() :=* l2_binder.get
+      l2.mmioNode := mmio_port
     case None =>
       memory_port.get := l1_xbar
   }
@@ -166,7 +168,7 @@ class L2TopInlined()(implicit p: Parameters) extends LazyModule
     TLFilter(TLFilter.mSubtract(mmioFilters)) :=
     TLBuffer() :=
     mmio_xbar
-  
+
   beu_local_int_source_buffer := beu_local_int_source
 
   class Imp(wrapper: LazyModule) extends LazyModuleImp(wrapper) {
@@ -196,7 +198,7 @@ class L2TopInlined()(implicit p: Parameters) extends LazyModule
         val fromCore = Input(Bool())
         val toTile = Output(Bool())
       })
-      val cpu_halt = new Bundle() {
+      val cpu_wfi = new Bundle() {
         val fromCore = Input(Bool())
         val toTile = Output(Bool())
       }
@@ -231,7 +233,7 @@ class L2TopInlined()(implicit p: Parameters) extends LazyModule
       val pfCtrlFromCore = Input(new PrefetchCtrlFromCore)
       val l2_tlb_req = new TlbRequestIO(nRespDups = 2)
       val l2_pmp_resp = Flipped(new PMPRespBundle)
-      val l2_hint = ValidIO(new L2ToL1Hint())
+      val l2_hint = Vec(numMemChannelsFromDcache, ValidIO(new L2ToL1Hint()))
       val perfEvents = Output(Vec(numPCntHc * coreParams.L2NBanks + 1, new PerfEvent))
       val l2_flush_en = Option.when(EnablePowerDown) (Input(Bool()))
       val l2_flush_done = Option.when(EnablePowerDown) (Output(Bool()))
@@ -262,7 +264,7 @@ class L2TopInlined()(implicit p: Parameters) extends LazyModule
       teemsiInfo.toCore.valid := RegNext(teemsiInfo.fromTile.valid)
       teemsiInfo.toCore.bits := RegEnable(teemsiInfo.fromTile.bits, teemsiInfo.fromTile.valid)
     }
-    io.cpu_halt.toTile := RegNext(io.cpu_halt.fromCore)
+    io.cpu_wfi.toTile := RegNext(io.cpu_wfi.fromCore)
     io.cpu_critical_error.toTile := RegNext(io.cpu_critical_error.fromCore)
     io.msiAck.toTile := io.msiAck.fromCore
     io.teemsiAck.foreach( teemsiAck => teemsiAck.toTile := teemsiAck.fromCore)
@@ -296,7 +298,7 @@ class L2TopInlined()(implicit p: Parameters) extends LazyModule
     }
 
     dontTouch(io.hartId)
-    dontTouch(io.cpu_halt)
+    dontTouch(io.cpu_wfi)
     dontTouch(io.cpu_critical_error)
     if (!io.chi.isEmpty) { dontTouch(io.chi.get) }
 
@@ -354,12 +356,11 @@ class L2TopInlined()(implicit p: Parameters) extends LazyModule
       l2.io.l2_tlb_req.pmp_resp.mmio := io.l2_pmp_resp.mmio
       l2.io.l2_tlb_req.pmp_resp.atomic := io.l2_pmp_resp.atomic
       l2cache.get match {
-        case l2cache: TL2CHICoupledL2 =>
+        case l2cache: CoupledL2 =>
           val l2 = l2cache.module
-          l2.io_nodeID := io.nodeID.get
-          io.chi.get <> l2.io_chi
-          l2.io_cpu_halt.foreach { _:= io.cpu_halt.fromCore }
-        case l2cache: TL2TLCoupledL2 =>
+          l2.io.nodeID := io.nodeID.get
+          io.chi.get <> l2.io.chi
+          l2.io.cpu_wfi.foreach { _ := io.cpu_wfi.fromCore }
       }
 
       beu.module.io.errors.l2.ecc_error.valid := l2.io.error.valid

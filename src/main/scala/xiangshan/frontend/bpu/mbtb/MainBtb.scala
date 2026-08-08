@@ -50,18 +50,17 @@ class MainBtb(implicit p: Parameters) extends BasePredictor with HasMainBtbParam
   /* *** submodules *** */
   private val alignBanks = Seq.tabulate(NumAlignBanks)(alignIdx => Module(new MainBtbAlignBank(alignIdx)))
 
-  io.resetDone := alignBanks.map(_.io.resetDone).reduce(_ && _)
+  io.sramResetDone := alignBanks.map(_.io.sramResetDone).reduce(_ && _)
 
   io.trainReady := true.B
 
-  private val s0_fire, s1_fire, s2_fire, s3_fire = Wire(Bool())
+  private val s0_fire, s1_fire, s2_fire, s3_fire, t0_fire = Wire(Bool())
   alignBanks.foreach { b =>
     b.io.stageCtrl.s0_fire := s0_fire
     b.io.stageCtrl.s1_fire := s1_fire
     b.io.stageCtrl.s2_fire := s2_fire
     b.io.stageCtrl.s3_fire := s3_fire
-    // alignBank does not care t0, it's using t1 only
-    b.io.stageCtrl.t0_fire := false.B
+    b.io.stageCtrl.t0_fire := t0_fire
   }
 
   /* *** s0 ***
@@ -124,10 +123,19 @@ class MainBtb(implicit p: Parameters) extends BasePredictor with HasMainBtbParam
   }
 
   /* *** t0 ***
-   * receive training data and latch
+   * receive training data
+   * send startPc to alignBank for replacer state reading
    */
-  private val t0_fire  = io.stageCtrl.t0_fire && io.enable
+  t0_fire := io.stageCtrl.t0_fire && io.enable
   private val t0_train = io.train
+
+  private val t0_startPc    = t0_train.startPc
+  private val t0_rotator    = VecRotate(getAlignBankIndex(t0_startPc))
+  private val t0_startPcVec = t0_rotator.rotate(t0_train.startPcVec.get)
+
+  alignBanks.zipWithIndex.foreach { case (b, i) =>
+    b.io.t0_startPc := t0_startPcVec(i)
+  }
 
   /* *** t1 ***
    * calculate write data and write to alignBanks
@@ -135,11 +143,9 @@ class MainBtb(implicit p: Parameters) extends BasePredictor with HasMainBtbParam
   private val t1_fire  = RegNext(t0_fire, init = false.B) && io.enable
   private val t1_train = RegEnable(t0_train, t0_fire)
 
-  private val t1_startPc = t1_train.startPc
-  private val t1_rotator = VecRotate(getAlignBankIndex(t1_startPc))
-  private val t1_startPcVec = t1_rotator.rotate(
-    VecInit.tabulate(NumAlignBanks)(i => getAlignedPc(t1_startPc + (i << FetchBlockAlignWidth).U))
-  )
+  private val t1_rotator    = RegEnable(t0_rotator, t0_fire)
+  private val t1_startPcVec = RegEnable(t0_startPcVec, t0_fire)
+
   private val t1_meta           = t1_train.meta.mbtb
   private val t1_mispredictInfo = t1_train.mispredictBranch
 

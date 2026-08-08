@@ -24,7 +24,6 @@ import freechips.rocketchip.rocket.Instructions
 import freechips.rocketchip.util.uintToBitPat
 import utils._
 import utility._
-import xiangshan.ExceptionNO.illegalInstr
 import xiangshan._
 import xiangshan.backend.fu.fpu.FPU
 import xiangshan.backend.fu.FuType
@@ -235,8 +234,7 @@ class UopInfoGen (implicit p: Parameters) extends XSModule {
     UopSplitType.VEC_US_FF_LD -> (numOfUopVLoadStoreStrided +& 2.U),
     UopSplitType.VEC_S_LDST -> (numOfUopVLoadStoreStrided +& 2.U),    // with two move instructions
     UopSplitType.VEC_I_LDST -> (numOfUopVLoadStoreIndexed +& 1.U),
-    UopSplitType.AMO_CAS_W -> 2.U,
-    UopSplitType.AMO_CAS_D -> 2.U,
+    UopSplitType.AMO_CAS_BHWD -> 2.U,
     UopSplitType.AMO_CAS_Q -> 4.U,
   ))
 

@@ -20,6 +20,7 @@ import chisel3.util._
 import org.chipsalliance.cde.config.Parameters
 import utility.XSPerfAccumulate
 import utility.XSPerfHistogram
+import utility.XSPerfSeqAccumulate
 import xiangshan.frontend.PrunedAddr
 import xiangshan.frontend.bpu.BranchInfo
 import xiangshan.frontend.bpu.Prediction
@@ -66,8 +67,8 @@ class MainBtbAlignBank(
       val req: Valid[Req] = Flipped(Valid(new Req))
     }
 
-    val resetDone: Bool      = Output(Bool())
-    val stageCtrl: StageCtrl = Input(new StageCtrl)
+    val sramResetDone: Bool      = Output(Bool())
+    val stageCtrl:     StageCtrl = Input(new StageCtrl)
 
     val read:  Read                  = new Read
     val write: Write                 = new Write
@@ -75,6 +76,9 @@ class MainBtbAlignBank(
 
     // final s3_takenMask (mbtb + tage + sc), used to touch replacer accurately
     val s3_takenMask: Vec[Bool] = Input(Vec(NumWay, Bool()))
+
+    // fast path of train pc, used to read replacer in advance for better timing
+    val t0_startPc: PrunedAddr = Input(new PrunedAddr(VAddrBits))
   }
 
   val io: MainBtbAlignBankIO = IO(new MainBtbAlignBankIO)
@@ -89,7 +93,7 @@ class MainBtbAlignBank(
 
   private val replacer = Module(new MainBtbReplacer)
 
-  io.resetDone := internalBanks.map(_.io.resetDone).reduce(_ && _)
+  io.sramResetDone := internalBanks.map(_.io.sramResetDone).reduce(_ && _)
 
   /* *** s0 ***
    * send read req to internal banks (srams)
@@ -164,7 +168,7 @@ class MainBtbAlignBank(
     val hit = rawHit && e.position >= s2_alignedInstOffset && !s2_crossPage
     pred.valid            := hit
     pred.bits.cfiPosition := Cat(s2_posHigherBits, e.position)
-    pred.bits.target      := getFullTarget(s2_startPc, e.targetLowerBits, Some(e.targetCarry))
+    pred.bits.target      := getFullTarget(s2_startPc, e.targetLowerBits, e.targetCarry)
     pred.bits.attribute   := e.attribute
     pred.bits.taken       := c.isPositive
 
@@ -186,9 +190,20 @@ class MainBtbAlignBank(
   private val s3_takenMask      = io.s3_takenMask
 
   // touch taken entries only: not-taken conditional entries are considered not very useful and should be killed first
-  replacer.io.predictTouch.valid        := s3_fire && s3_takenMask.reduce(_ || _)
-  replacer.io.predictTouch.bits.setIdx  := s3_replacerSetIdx
-  replacer.io.predictTouch.bits.wayMask := s3_takenMask.asUInt
+  replacer.io.predict.touch.valid        := s3_fire && s3_takenMask.reduce(_ || _)
+  replacer.io.predict.touch.bits.setIdx  := s3_replacerSetIdx
+  replacer.io.predict.touch.bits.wayMask := s3_takenMask.asUInt
+
+  /* *** t0 ***
+   * read replacer in advance for better timing
+   */
+  private val t0_fire    = io.stageCtrl.t0_fire
+  private val t0_startPc = io.t0_startPc
+
+  replacer.io.train.t0_setIdx := getReplacerSetIndex(t0_startPc)
+  replacer.io.train.t0_fire   := t0_fire
+
+  private val t0_victimMask = replacer.io.train.t0_victim
 
   /* *** t1 ***
    * send write req to internal banks (srams)
@@ -203,6 +218,7 @@ class MainBtbAlignBank(
   private val t1_internalBankIdx  = getInternalBankIndex(t1_startPc)
   private val t1_internalBankMask = UIntToOH(t1_internalBankIdx, NumInternalBanks)
   private val t1_alignBankIdx     = getAlignBankIndex(t1_startPc)
+  private val t1_victimMask       = RegEnable(t0_victimMask, t0_fire)
 
   /* *** update entry *** */
   // NOTE: the original rawHit result can be multi-hit (i.e. multiple rawHit && position match), so PriorityEncoderOH
@@ -220,15 +236,15 @@ class MainBtbAlignBank(
       !(t1_mispredictInfo.bits.attribute === Mux1H(t1_hitMask, t1_meta.map(_.attribute)))
   )
   // Use hit wayMask if hit, else use replacer's victim way
-  private val t1_entryWayMask = Mux(t1_hit, t1_hitMask, replacer.io.victim.wayMask)
+  private val t1_entryWayMask = Mux(t1_hit, t1_hitMask, t1_victimMask)
 
   private val t1_entry = Wire(new MainBtbEntry)
   t1_entry.valid           := true.B
   t1_entry.tag             := getTag(t1_startPc)
+  t1_entry.attribute       := t1_mispredictInfo.bits.attribute
   t1_entry.position        := t1_mispredictInfo.bits.cfiPosition
   t1_entry.targetLowerBits := getTargetLowerBits(t1_mispredictInfo.bits.target)
-  t1_entry.targetCarry     := getTargetCarry(t1_startPc, t1_mispredictInfo.bits.target)
-  t1_entry.attribute       := t1_mispredictInfo.bits.attribute
+  t1_entry.targetCarry.foreach(_ := getTargetCarry(t1_startPc, t1_mispredictInfo.bits.target))
 
   // similar to s0 case
   assert(!t1_fire || t1_alignBankIdx === alignIdx.U, "MainBtbAlignBank alignIdx mismatch")
@@ -241,9 +257,9 @@ class MainBtbAlignBank(
   }
 
   // update replacer
-  replacer.io.trainTouch.valid        := t1_fire && t1_entryNeedWrite
-  replacer.io.trainTouch.bits.setIdx  := getReplacerSetIndex(t1_startPc)
-  replacer.io.trainTouch.bits.wayMask := t1_entryWayMask
+  replacer.io.train.t1_touch.valid        := t1_fire && t1_entryNeedWrite
+  replacer.io.train.t1_touch.bits.setIdx  := getReplacerSetIndex(t1_startPc)
+  replacer.io.train.t1_touch.bits.wayMask := t1_entryWayMask
 
   /* *** update counter *** */
   private val t1_newCounters    = Wire(Vec(NumWay, TakenCounter()))
@@ -288,7 +304,7 @@ class MainBtbAlignBank(
   io.trace.entry     := t1_entry
   XSPerfHistogram("multihit_count", PopCount(s2_multiHitMask), s2_fire, 0, NumWay)
 
-  XSPerfAccumulate(
+  XSPerfSeqAccumulate(
     "", // no common prefix is needed
     t1_fire && t1_mispredictInfo.valid,
     Seq(

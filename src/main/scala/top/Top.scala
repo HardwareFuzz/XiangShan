@@ -20,16 +20,14 @@ package top
 import chisel3._
 import chisel3.util._
 import chisel3.experimental.dataview._
-import difftest.{DifftestModule, HasDiffTestInterfaces}
+import difftest.{DifftestMemIO, DifftestModule, HasDiffTestInterfaces}
 import xiangshan._
 import utils._
 import utility._
 import utility.sram.SramBroadcastBundle
-import huancun.{HCCacheParameters, HCCacheParamsKey, HuanCun, PrefetchRecv, TPmetaResp}
-import coupledL2.EnableCHI
-import coupledL2.tl2chi.CHILogger
-import openLLC.{OpenLLC, OpenLLCParamKey, OpenNCB}
-import openLLC.TargetBinder._
+import xscache.chi.CHILogger
+import xscache.openLLC.{OpenLLC, OpenLLCParamKey, OpenNCB}
+import xscache.openLLC.TargetBinder._
 import cc.xiangshan.openncb._
 import system._
 import device._
@@ -42,6 +40,7 @@ import freechips.rocketchip.tilelink._
 import freechips.rocketchip.interrupts._
 import freechips.rocketchip.amba.axi4._
 import freechips.rocketchip.jtag.JTAGIO
+import freechips.rocketchip.util.{AsyncQueueParams, AsyncQueueSink}
 import chisel3.experimental.annotate
 
 import scala.collection.mutable.Map
@@ -102,19 +101,6 @@ class XSTop()(implicit p: Parameters) extends BaseXSSoc()
       case PerfCounterOptionsKey => up(PerfCounterOptionsKey).copy(perfDBHartID = coreParams.HartId)
     })))
   )
-
-  val l3cacheOpt = soc.L3CacheParamsOpt.map(l3param =>
-    LazyModule(new HuanCun()(new Config((_, _, _) => {
-      case HCCacheParamsKey => l3param.copy(
-        hartIds = tiles.map(_.HartId),
-        FPGAPlatform = debugOpts.FPGAPlatform
-      )
-      case MaxHartIdBits => p(MaxHartIdBits)
-      case LogUtilsOptionsKey => p(LogUtilsOptionsKey)
-      case PerfCounterOptionsKey => p(PerfCounterOptionsKey)
-    })))
-  )
-
   val chi_llcBridge_opt = Option.when(enableCHI)(
     LazyModule(new OpenNCB()(p.alter((site, here, up) => {
       case NCBParametersKey => new NCBParameters(
@@ -147,15 +133,6 @@ class XSTop()(implicit p: Parameters) extends BaseXSSoc()
     })))
   ))
 
-  // receive all prefetch req from cores
-  val memblock_pf_recv_nodes: Seq[Option[BundleBridgeSink[PrefetchRecv]]] = core_with_l2.map(_.core_l3_pf_port).map{
-    x => x.map(_ => BundleBridgeSink(Some(() => new PrefetchRecv)))
-  }
-
-  val l3_pf_sender_opt = soc.L3CacheParamsOpt.getOrElse(HCCacheParameters()).prefetch match {
-    case Some(pf) => Some(BundleBridgeSource(() => new PrefetchRecv))
-    case None => None
-  }
   val nmiIntNode = IntSourceNode(IntSourcePortSimple(1, NumCores, (new NonmaskableInterruptIO).elements.size))
   val nmi = InModuleBody(nmiIntNode.makeIOs())
 
@@ -169,10 +146,6 @@ class XSTop()(implicit p: Parameters) extends BaseXSSoc()
       misc.peripheral_ports.get(i) := core_with_l2(i).tl_uncache
     }
     core_with_l2(i).memory_port.foreach(port => (misc.core_to_l3_ports.get)(i) :=* port)
-    memblock_pf_recv_nodes(i).map(recv => {
-      println(s"Connecting Core_${i}'s L1 pf source to L3!")
-      recv := core_with_l2(i).core_l3_pf_port.get
-    })
     misc.SepTLXbarOpt.foreach { SepTLXbarOpt =>
       // SeperateBus can only be connected to DebugModule now in non-XSNoCTop environment
       println(s"SeparateDM: ${SeperateDM}")
@@ -184,44 +157,11 @@ class XSTop()(implicit p: Parameters) extends BaseXSSoc()
       SepTLXbarOpt := core_with_l2(i).sep_tl_opt.get
     }
   }
-  l3cacheOpt.map(_.ctlnode.map(_ := misc.peripheralXbar.get))
-  l3cacheOpt.map(_.intnode.map(int => {
-    misc.plic.intnode := IntBuffer() := int
-  }))
-
-  val core_rst_nodes = if(l3cacheOpt.nonEmpty && l3cacheOpt.get.rst_nodes.nonEmpty){
-    l3cacheOpt.get.rst_nodes.get
-  } else {
-    core_with_l2.map(_ => BundleBridgeSource(() => Reset()))
-  }
+  val core_rst_nodes = core_with_l2.map(_ => BundleBridgeSource(() => Reset()))
 
   core_rst_nodes.zip(core_with_l2.map(_.core_reset_sink)).foreach({
     case (source, sink) =>  sink := source
   })
-
-  l3cacheOpt match {
-    case Some(l3) =>
-      misc.l3_out :*= l3.node :*= misc.l3_banked_xbar.get
-      l3.pf_recv_node.map(recv => {
-        println("Connecting L1 prefetcher to L3!")
-        recv := l3_pf_sender_opt.get
-      })
-      l3.tpmeta_recv_node.foreach(recv => {
-        for ((core, i) <- core_with_l2.zipWithIndex) {
-          println(s"Connecting core_$i\'s L2 TPmeta request to L3!")
-          recv := core.core_l3_tpmeta_source_port.get
-        }
-      })
-      l3.tpmeta_send_node.foreach(send => {
-        val broadcast = LazyModule(new ValidIOBroadcast[TPmetaResp]())
-        broadcast.node := send
-        for ((core, i) <- core_with_l2.zipWithIndex) {
-          println(s"Connecting core_$i\'s L2 TPmeta response to L3!")
-          core.core_l3_tpmeta_sink_port.get := broadcast.node
-        }
-      })
-    case None =>
-  }
 
   chi_llcBridge_opt match {
     case Some(ncb) =>
@@ -231,10 +171,10 @@ class XSTop()(implicit p: Parameters) extends BaseXSSoc()
 
   chi_mmioBridge_opt.foreach { e =>
     e match {
-      case Some(ncb) =>
-        misc.soc_xbar.get := ncb.axi4node
-      case None =>
-    }
+    case Some(ncb) =>
+      misc.soc_xbar.get := ncb.axi4node
+    case None =>
+  }
   }
 
   class XSTopImp(wrapper: XSTop) extends LazyRawModuleImp(wrapper)
@@ -274,7 +214,7 @@ class XSTop()(implicit p: Parameters) extends BaseXSSoc()
       val debug_reset = Output(Bool())
       val rtc_clock = Input(Clock())
       val cacheable_check = new TLPMAIO()
-      val riscv_halt = Output(Vec(NumCores, Bool()))
+      val riscv_wfi = Output(Vec(NumCores, Bool()))
       val riscv_critical_error = Output(Vec(NumCores, Bool()))
       val riscv_rst_vec = Input(Vec(NumCores, UInt(soc.PAddrBits.W)))
       val traceCoreInterface = Vec(NumCores, new Bundle {
@@ -336,14 +276,24 @@ class XSTop()(implicit p: Parameters) extends BaseXSSoc()
     misc.module.bus_clock := io.clock
     misc.module.bus_reset := io.reset
 
-
+    val clintTime = WireInit(0.U.asTypeOf(ValidIO(UInt(64.W))))
+    EnableClintAsyncBridge match {
+      case Some(param) =>
+        val time_sink = withClockAndReset(core_with_l2.head.module.clock, core_with_l2.head.module.reset)(Module(new AsyncQueueSink(UInt(64.W), param)))
+        time_sink.io.async <> misc.module.clintTime
+        time_sink.io.deq.ready := true.B
+        clintTime.valid := time_sink.io.deq.valid
+        clintTime.bits  := time_sink.io.deq.bits
+      case None =>
+       clintTime := misc.module.clintTime
+    }
 
     for ((core, i) <- core_with_l2.zipWithIndex) {
       core.module.io.hartId := i.U
       core.module.io.msiInfo := msiInfo
       core.module.io.teemsiInfo.foreach(_ := msiInfo)
-      core.module.io.clintTime := misc.module.clintTime
-      io.riscv_halt(i) := core.module.io.cpu_halt
+      core.module.io.clintTime := clintTime
+      io.riscv_wfi(i) := core.module.io.cpu_wfi
       io.riscv_critical_error(i) := core.module.io.cpu_crtical_error
       // trace Interface
       val traceInterface = core.module.io.traceCoreInterface
@@ -395,37 +345,21 @@ class XSTop()(implicit p: Parameters) extends BaseXSSoc()
       }
     }
 
-    if(l3cacheOpt.isEmpty || l3cacheOpt.get.rst_nodes.isEmpty){
-      // tie off core soft reset
-      for(node <- core_rst_nodes){
-        node.out.head._1 := false.B.asAsyncReset
-      }
+    // tie off core soft reset
+    for(node <- core_rst_nodes){
+      node.out.head._1 := false.B.asAsyncReset
     }
 
-    l3cacheOpt match {
+    chi_openllc_opt match {
       case Some(l3) =>
-        l3.pf_recv_node match {
-          case Some(recv) =>
-            l3_pf_sender_opt.get.out.head._1.addr_valid := VecInit(memblock_pf_recv_nodes.map(_.get.in.head._1.addr_valid)).asUInt.orR
-            for (i <- 0 until NumCores) {
-              when(memblock_pf_recv_nodes(i).get.in.head._1.addr_valid) {
-                l3_pf_sender_opt.get.out.head._1.addr := memblock_pf_recv_nodes(i).get.in.head._1.addr
-                l3_pf_sender_opt.get.out.head._1.l2_pf_en := memblock_pf_recv_nodes(i).get.in.head._1.l2_pf_en
-              }
-            }
-          case None =>
+        l3.io.debugTopDown.robHeadPaddr := core_with_l2.map(_.module.io.debugTopDown.robHeadPaddr)
+        core_with_l2.zip(l3.io.debugTopDown.addrMatch).foreach { case (tile, l3Match) =>
+          tile.module.io.debugTopDown.l3MissMatch := l3Match
         }
-        l3.module.io.debugTopDown.robHeadPaddr := core_with_l2.map(_.module.io.debugTopDown.robHeadPaddr)
-        core_with_l2.zip(l3.module.io.debugTopDown.addrMatch).foreach { case (tile, l3Match) => tile.module.io.debugTopDown.l3MissMatch := l3Match }
-        core_with_l2.foreach(_.module.io.l3Miss := l3.module.io.l3Miss)
+        core_with_l2.foreach(_.module.io.l3Miss := l3.io.l3Miss)
       case None =>
-    }
-
-    (chi_openllc_opt, l3cacheOpt) match {
-      case (None, None) =>
         core_with_l2.foreach(_.module.io.debugTopDown.l3MissMatch := false.B)
         core_with_l2.foreach(_.module.io.l3Miss := false.B)
-      case _ =>
     }
 
     core_with_l2.zipWithIndex.foreach { case (tile, i) =>
@@ -454,12 +388,12 @@ class XSTop()(implicit p: Parameters) extends BaseXSSoc()
 
     withClockAndReset(io.clock, reset_sync) {
       // Modules are reset one by one
-      // reset ----> SYNC --> {SoCMisc, L3 Cache, Cores}
-      val resetChain = Seq(Seq(misc.module) ++ l3cacheOpt.map(_.module))
+      // reset ----> SYNC --> {SoCMisc, Cores}
+      val resetChain = Seq(Seq(misc.module))
       ResetGen(resetChain, reset_sync, !debugOpts.ResetGen)
-      // Ensure that cores could be reset when DM disable `hartReset` or l3cacheOpt.isEmpty.
+      // Ensure that cores could be reset when DM disable `hartReset`.
       val dmResetReqVec = misc.module.debug_module_io.resetCtrl.hartResetReq.getOrElse(0.U.asTypeOf(Vec(core_with_l2.map(_.module).length, Bool())))
-      val syncResetCores = if(l3cacheOpt.nonEmpty) l3cacheOpt.map(_.module).get.reset.asBool else misc.module.reset.asBool
+      val syncResetCores = misc.module.reset.asBool
       (core_with_l2.map(_.module)).zip(dmResetReqVec).map { case(core, dmResetReq) =>
         ResetGen(Seq(Seq(core)), (syncResetCores || dmResetReq).asAsyncReset, !debugOpts.ResetGen)
       }
@@ -478,6 +412,7 @@ class XSTileDiffTop(implicit p: Parameters) extends XSTop {
     override def cpuName: Option[String] = Some("XiangShan")
     override protected def implicitClock: Clock = io.clock
     override protected def implicitReset: Reset = io.reset
+    override def difftestMemIO: Option[DifftestMemIO] = Some(DifftestMemIO(memory))
   }
   override lazy val module = new XSTileDiffTopImp(this)
 }

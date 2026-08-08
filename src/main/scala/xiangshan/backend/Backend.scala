@@ -44,7 +44,7 @@ import xiangshan.backend.fu.NewCSR.PFEvent
 import xiangshan.backend.rob.{RobCoreTopDownIO, RobDebugRollingIO, RobLsqIO, RobPtr}
 import xiangshan.backend.trace.TraceCoreInterface
 import xiangshan.frontend.ftq.FtqPtr
-import xiangshan.mem.{LqPtr, LsqEnqIO, SqPtr}
+import xiangshan.mem.{LqPtr, LsqEnqIO, SqPtr, ToLsqEnqCtrl}
 
 
 class Backend(val params: BackendParams)(implicit p: Parameters) extends LazyModule
@@ -217,22 +217,22 @@ class BackendInlinedImp(override val wrapper: BackendInlined)(implicit p: Parame
   ctrlBlock.io.fromMem.stIn <> io.mem.stIn
   ctrlBlock.io.fromMem.violation <> io.mem.memoryViolation
   ctrlBlock.io.fromMem.mdpTrain <> io.mem.mdpTrain
+  ctrlBlock.io.fromMemToLsqEnqCtrl := io.mem.toLsqEnqCtrl
   ctrlBlock.io.lqCanAccept := io.mem.lqCanAccept
   ctrlBlock.io.sqCanAccept := io.mem.sqCanAccept
 
   io.mem.wfi <> ctrlBlock.io.toMem.wfi
 
   io.mem.lsqEnqIO <> ctrlBlock.io.toMem.lsqEnqIO
-  ctrlBlock.io.fromMemToDispatch.scommit := io.mem.sqDeq
-  ctrlBlock.io.fromMemToDispatch.lcommit := io.mem.lqDeq
-  ctrlBlock.io.fromMemToDispatch.sqDeqPtr := io.mem.sqDeqPtr
-  ctrlBlock.io.fromMemToDispatch.lqDeqPtr := io.mem.lqDeqPtr
-  ctrlBlock.io.fromMemToDispatch.sqCancelCnt := io.mem.sqCancelCnt
-  ctrlBlock.io.fromMemToDispatch.lqCancelCnt := io.mem.lqCancelCnt
+  ctrlBlock.io.fromMemToLsqEnqCtrl  <> io.mem.toLsqEnqCtrl
   ctrlBlock.io.toDispatch.wakeUpInt := intRegion.io.wakeUpToDispatch
   ctrlBlock.io.toDispatch.wakeUpFp  := fpRegion.io.wakeUpToDispatch
   ctrlBlock.io.toDispatch.wakeUpVec := vecRegion.io.wakeUpToDispatch
   ctrlBlock.io.toDispatch.IQValidNumVec := intRegion.io.IQValidNumVec ++ fpRegion.io.IQValidNumVec ++ vecRegion.io.IQValidNumVec
+  ctrlBlock.io.toDispatch.debugIQValidNumVec.foreach(_ := intRegion.io.debugIQValidNumVec.get ++
+    fpRegion.io.debugIQValidNumVec.get ++ vecRegion.io.debugIQValidNumVec.get)
+  ctrlBlock.io.toDispatch.debugIQEnqHasIssuedVec.foreach(_ := intRegion.io.debugIQEnqHasIssuedVec.get ++
+    fpRegion.io.debugIQEnqHasIssuedVec.get ++ vecRegion.io.debugIQEnqHasIssuedVec.get)
   ctrlBlock.io.toDispatch.ldCancel := io.mem.ldCancel
   // Todo: when add cross domain wake up, it is necessary to add assertions that fp and vec do not have 0 lat fu.
   ctrlBlock.io.toDispatch.og0Cancel := intRegion.io.og0Cancel
@@ -269,6 +269,7 @@ class BackendInlinedImp(override val wrapper: BackendInlined)(implicit p: Parame
   ctrlBlock.io.robio.lsTopdownInfo <> io.mem.lsTopdownInfo
   ctrlBlock.io.robio.debug_ls <> io.mem.debugLS
   ctrlBlock.io.debugEnqLsq.canAccept := io.mem.lsqEnqIO.canAccept
+  ctrlBlock.io.debugEnqLsq.recoverStall := io.mem.lsqEnqIO.recoverStall
   ctrlBlock.io.debugEnqLsq.resp := io.mem.lsqEnqIO.resp
   ctrlBlock.io.debugEnqLsq.req := ctrlBlock.io.toMem.lsqEnqIO.req
   ctrlBlock.io.debugEnqLsq.needAlloc := ctrlBlock.io.toMem.lsqEnqIO.needAlloc
@@ -295,13 +296,14 @@ class BackendInlinedImp(override val wrapper: BackendInlined)(implicit p: Parame
 
   intRegion.io.memWriteback.zip(io.mem.intWriteback).foreach { case (sinkWriteback, sourceWriteback) =>
     sinkWriteback.zip(sourceWriteback).foreach { case (sink, source) =>
-      connectMemNewExuOutput(sink, source)
+      sink.valid := source.toRob.valid
+      sink.bits := source.toNewExuOutputBundle()
     }
   }
-  val lduWriteback = io.mem.intWriteback.flatten.filter(_.bits.params.hasLoadFu)
+  val lduWriteback = io.mem.intWriteback.flatten.filter(_.params.hasLoadFu)
   fpRegion.io.lduWriteback.get.flatten.zip(lduWriteback).map { case (sink, source) =>
-    sink.valid := source.valid
-    sink.bits := source.bits
+    sink.valid := source.toRob.valid
+    sink.bits := source.toNewExuOutputBundle()
   }
   intRegion.io.wakeUpFromFp. foreach(x => x := fpRegion.io.wakeUpToDispatch)
   intRegion.io.wakeupFromF2I.foreach(x => x := fpRegion.io.cross.F2IWakeupOut.get)
@@ -310,7 +312,10 @@ class BackendInlinedImp(override val wrapper: BackendInlined)(implicit p: Parame
   fpRegion.io.wakeupFromI2F. foreach(x => x := intRegion.io.cross.I2FWakeupOut.get)
   intRegion.io.F2IWakeupIn.  foreach(x => x := fpRegion.io.cross.F2IWakeupOut.get)
   intRegion.io.wakeupFromLDU.foreach(x => x := io.mem.wakeup)
+  intRegion.io.wakeupToLRQ.foreach(x => io.mem.wakeupToLRQ.zip(x.flatten).foreach { case (sink, source) => sink := source })
+  intRegion.io.wakeupToLRQCancel.foreach(x => io.mem.wakeupToLRQCancel.zip(x.flatten).foreach { case (sink, source) => sink := source })
   intRegion.io.staFeedback.  foreach(x => x := io.mem.staIqFeedback)
+  intRegion.io.stdFeedback.  foreach(x => x := io.mem.stdIqFeedback)
   vecRegion.io.vstuFeedback. foreach(x => x := io.mem.vstuIqFeedback)
   intRegion.io.ldCancel := io.mem.ldCancel
   intRegion.io.vlWriteBackInfoIn := 0.U.asTypeOf(intRegion.io.vlWriteBackInfoIn)
@@ -390,6 +395,13 @@ class BackendInlinedImp(override val wrapper: BackendInlined)(implicit p: Parame
   // for vecIQ read int/fp regfile
   vecRegion.io.fromIntIQ.get <> intRegion.io.intIQOut.get
   vecRegion.io.fromFpIQ.get <> fpRegion.io.fpIQOut.get
+
+  // deqOg1
+  Seq(intRegion, fpRegion, vecRegion).map{region =>
+    region.io.fromIntIQDeqOg1Payload.foreach(_ := intRegion.io.intIQDeqOg1PayloadOut.get)
+    region.io.fromFpIQDeqOg1Payload.foreach(_ := fpRegion.io.fpIQDeqOg1PayloadOut.get)
+    region.io.fromVecIQDeqOg1Payload.foreach(_ := vecRegion.io.vecIQDeqOg1PayloadOut.get)
+  }
 
   vecRegion.io.diffVlRat.foreach(_ := ctrlBlock.io.diff_vl_rat.get)
   vecRegion.io.fromVecExcpMod.get.r := vecExcpMod.o.toVPRF.r
@@ -505,10 +517,13 @@ class BackendInlinedImp(override val wrapper: BackendInlined)(implicit p: Parame
   ctrlBlock.io.robio.robHeadLsIssue := issue.flatten.map(deq =>
     deq.fire && deq.bits.robIdx === ctrlBlock.io.robio.robDeqPtr
   ).reduce(_ || _)
+  ctrlBlock.io.robio.debugIQDeqRobIdxVec.foreach(_ := intRegion.io.debugIQDeqRobIdxVec.get ++
+    fpRegion.io.debugIQDeqRobIdxVec.get ++ vecRegion.io.debugIQDeqRobIdxVec.get)
 
   // mem io
   io.mem.robLsqIO <> ctrlBlock.io.robio.lsq
   io.mem.storeDebugInfo <> ctrlBlock.io.robio.storeDebugInfo
+  io.mem.atomicDebugInfo <> ctrlBlock.io.robio.atomicDebugInfo
 
   io.frontendSfence := fenceio.sfence
   io.frontendTlbCsr := csrio.tlb
@@ -518,7 +533,7 @@ class BackendInlinedImp(override val wrapper: BackendInlined)(implicit p: Parame
 
   io.csrCustomCtrl := csrio.customCtrl
 
-  io.toTop.cpuHalted := ctrlBlock.io.toTop.cpuHalt
+  io.toTop.cpuWfi := ctrlBlock.io.toTop.cpuWfi
 
   io.traceCoreInterface <> ctrlBlock.io.traceCoreInterface
 
@@ -580,10 +595,16 @@ class BackendInlinedImp(override val wrapper: BackendInlined)(implicit p: Parame
   val csrevents = pfevent.io.hpmevent.slice(8,16)
 
   val ctrlBlockPerf    = ctrlBlock.getPerfEvents
-  
+
   val topDownPerf = topDownMod.getPerfEvents
 
-  val perfBackend  = Seq()
+  XSPerfAccumulate("cpu_cycle", true.B)
+  XSPerfAccumulate("ref_cpu_cycle", io.fromTop.clintTime.valid)
+
+  val perfBackend  = Seq(
+    ("cpu_cycle",     true.B),
+    ("ref_cpu_cycle", io.fromTop.clintTime.valid)
+  )
   // let index = 0 be no event
   val allPerfEvents = Seq(("noEvent", 0.U)) ++ ctrlBlockPerf ++ topDownPerf ++ perfBackend
 
@@ -626,8 +647,8 @@ class BackendMemIO(implicit p: Parameters, params: BackendParams) extends XSBund
   // In/Out // Todo: split it into one-direction bundle
   val lsqEnqIO = Flipped(new LsqEnqIO)
   val robLsqIO = new RobLsqIO
-  val ldaIqFeedback = Vec(params.LduCnt, Flipped(new MemRSFeedbackIO))
   val staIqFeedback = Vec(params.StaCnt, Flipped(new MemRSFeedbackIO))
+  val stdIqFeedback = Vec(params.StdCnt, Flipped(new MemRSFeedbackIO))
   val hyuIqFeedback = Vec(params.HyuCnt, Flipped(new MemRSFeedbackIO))
   val vstuIqFeedback = Flipped(Vec(params.VstuCnt, new MemRSFeedbackIO(isVector = true)))
   val vlduIqFeedback = Flipped(Vec(params.VlduCnt, new MemRSFeedbackIO(isVector = true)))
@@ -636,8 +657,8 @@ class BackendMemIO(implicit p: Parameters, params: BackendParams) extends XSBund
   val storePcRead = Vec(params.StaCnt, Output(UInt(VAddrBits.W)))
   val hyuPcRead = Vec(params.HyuCnt, Output(UInt(VAddrBits.W)))
   // Input
-  val intWriteback: MixedVec[MixedVec[DecoupledIO[ExuOutput]]] =
-    Flipped(intSchdParams.genExuOutputDecoupledBundleMemBlock)
+  val intWriteback: MixedVec[MixedVec[MemWriteBack]] =
+    Flipped(intSchdParams.genMemWriteBackBundle)
   val vecWriteback: MixedVec[MixedVec[DecoupledIO[ExuOutput]]] =
     Flipped(vecSchdParams.genExuOutputDecoupledBundleMemBlock)
 
@@ -650,13 +671,10 @@ class BackendMemIO(implicit p: Parameters, params: BackendParams) extends XSBund
     val gpaddr = UInt(XLEN.W)
     val isForVSnonLeafPTE = Bool()
   })
-  val sqDeq = Input(UInt(log2Ceil(EnsbufferWidth + 1).W))
-  val lqDeq = Input(UInt(log2Up(CommitWidth + 1).W))
+
+  val toLsqEnqCtrl = Flipped(new ToLsqEnqCtrl(params.hasStoreSchd, params.hasLoadSchd))
   val sqDeqPtr = Input(new SqPtr)
   val lqDeqPtr = Input(new LqPtr)
-
-  val lqCancelCnt = Input(UInt(log2Up(VirtualLoadQueueSize + 1).W))
-  val sqCancelCnt = Input(UInt(log2Up(StoreQueueSize + 1).W))
 
   val lqCanAccept = Input(Bool())
   val sqCanAccept = Input(Bool())
@@ -679,12 +697,18 @@ class BackendMemIO(implicit p: Parameters, params: BackendParams) extends XSBund
 
   val intIssue = intSchdParams.genExuInputCopySrcBundleMemBlock
   val vecIssue = vecSchdParams.genExuInputCopySrcBundleMemBlock
+  val wakeupToLRQ = Vec(params.StaCnt + params.StdCnt, ValidIO(new IssueQueueLRQWakeUpBundle))
+  val wakeupToLRQCancel = Vec(params.StaCnt + params.StdCnt, new IssueQueueLRQWakeUpCancelBundle)
 
   // store event difftest information
   val storeDebugInfo = Vec(EnsbufferWidth, new Bundle {
     val robidx = Input(new RobPtr)
     val pc     = Output(UInt(VAddrBits.W))
   })
+  val atomicDebugInfo = new Bundle {
+    val robidx = Input(new RobPtr)
+    val pc     = Output(UInt(VAddrBits.W))
+  }
 }
 
 class TopToBackendBundle(implicit p: Parameters) extends XSBundle with HasSoCParameter {
@@ -697,7 +721,7 @@ class TopToBackendBundle(implicit p: Parameters) extends XSBundle with HasSoCPar
 }
 
 class BackendToTopBundle(implicit p: Parameters) extends XSBundle with HasSoCParameter{
-  val cpuHalted = Output(Bool())
+  val cpuWfi = Output(Bool())
   val cpuCriticalError = Output(Bool())
   val msiAck = Output(Bool())
   val teemsiAck = Option.when(soc.IMSICParams.HasTEEIMSIC)(Output(Bool()))

@@ -18,7 +18,7 @@ Options:
       --preset NAME      Build preset:
                          aligned | unaligned
                          If omitted for the standard minimal build, defaults to `unaligned`
-      --config CLASS     Override CONFIG (e.g. TLMinimalConfig, TLMinimalNoL3Config, DefaultConfig, ...)
+      --config CLASS     Override CONFIG (e.g. MinimalConfig, DefaultConfig, ...)
       --tag TAG          Optional tag inserted into artifact name
 
   Coverage modes (default: none):
@@ -107,11 +107,11 @@ preset_tag=""
 if [[ -n "$PRESET" ]]; then
   case "$PRESET" in
     aligned)
-      CONFIG="${CONFIG:-AlignedAccessTLMinimalConfig}"
+      CONFIG="${CONFIG:-AlignedAccessConfig}"
       preset_tag="aligned"
       ;;
     unaligned)
-      CONFIG="${CONFIG:-UnalignedAccessTLMinimalConfig}"
+      CONFIG="${CONFIG:-UnalignedAccessConfig}"
       preset_tag="unaligned"
       ;;
     *)
@@ -120,7 +120,7 @@ if [[ -n "$PRESET" ]]; then
   esac
 fi
 
-CONFIG="${CONFIG:-TLMinimalConfig}"
+CONFIG="${CONFIG:-MinimalConfig}"
 if [[ -z "$TAG" && -n "$preset_tag" ]]; then
   TAG="$preset_tag"
 fi

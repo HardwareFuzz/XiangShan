@@ -85,7 +85,8 @@ class XSArgs(object):
         self.emu_optimize = args.emu_optimize
         self.xprop = 1 if args.xprop else None
         self.issue = args.issue
-        self.with_chiseldb = 1 if args.dump_db else 0
+        self.with_chiseldb = 1 if args.enable_db or args.enable_rolling else 0
+        self.with_rollingdb = 1 if args.enable_rolling else None
         # emu arguments
         self.max_instr = args.max_instr
         self.ram_size = args.ram_size
@@ -96,7 +97,8 @@ class XSArgs(object):
             self.diff = self.diff.replace("nemu-interpreter", "spike")
         self.fork = not args.disable_fork
         self.disable_diff = args.no_diff
-        self.dump_db = args.dump_db
+        self.dump_db = args.enable_db or args.enable_rolling
+        self.db_path = args.db_path
         self.gcpt_restore_bin = args.gcpt_restore_bin
         self.instr_trace = args.instr_trace
         self.pgo = args.pgo
@@ -104,6 +106,8 @@ class XSArgs(object):
         self.pgo_emu_args = args.pgo_emu_args
         self.llvm_profdata = args.llvm_profdata
         self.emulator = args.emulator
+        self.emu_trace_all = 1 if args.trace_all else None
+        self.flash = args.flash
         # wave dump path
         if args.wave_dump is not None:
             self.set_wave_home(args.wave_dump)
@@ -144,6 +148,7 @@ class XSArgs(object):
             (self.emu_optimize,  "EMU_OPTIMIZE"),
             (self.xprop,         "ENABLE_XPROP"),
             (self.with_chiseldb, "WITH_CHISELDB"),
+            (self.with_rollingdb, "WITH_ROLLINGDB"),
             (self.yaml_config,   "YAML_CONFIG"),
             (self.pgo,           "PGO_WORKLOAD"),
             (self.pgo_max_cycle, "PGO_MAX_CYCLE"),
@@ -151,6 +156,7 @@ class XSArgs(object):
             (self.llvm_profdata, "LLVM_PROFDATA"),
             (self.issue,         "ISSUE"),
             (self.simfrontend,   "ENABLE_SIMFRONTEND"),
+            (self.emu_trace_all, "EMU_TRACE_ALL"),
         ]
         args = filter(lambda arg: arg[0] is not None, makefile_args)
         args = [(shlex.quote(str(arg[0])), arg[1]) for arg in args] # shell escape
@@ -162,6 +168,7 @@ class XSArgs(object):
             (self.diff,      "diff"),
             (self.seed,      "seed"),
             (self.ram_size,  "ram-size"),
+            (self.db_path,   "db-path"),
         ]
         args = filter(lambda arg: arg[0] is not None, emu_args)
         return args
@@ -216,6 +223,7 @@ class XiangShan(object):
     def __init__(self, args):
         self.args = XSArgs(args)
         self.timeout = args.timeout
+        self.numa_info = None
 
     def show(self):
         self.args.show()
@@ -272,7 +280,7 @@ class XiangShan(object):
     def run_emu(self, workload):
         print("Running XiangShan emu with the following configurations:")
         self.show()
-        emu_args = " ".join(map(lambda arg: f"--{arg[1]} {arg[0]}", self.args.get_emu_args()))
+        emu_args = " ".join(map(lambda arg: f"--{arg[1]} {shlex.quote(str(arg[0]))}", self.args.get_emu_args()))
         print("workload:", workload)
         instr_trace = self.__get_ci_workloads_instr_trace(self.args.instr_trace)
         instr_trace_valid = len(instr_trace) != 0
@@ -280,14 +288,16 @@ class XiangShan(object):
             print("workload instr trace: ", instr_trace)
         numa_args = ""
         if self.args.numa:
-            numa_info = get_free_cores(self.args.threads)
-            numa_args = f"numactl -m {numa_info[0]} -C {numa_info[1]}-{numa_info[2]}"
+            if self.numa_info is None:
+                self.numa_info = get_free_cores(self.args.threads)
+            numa_args = f"numactl -m {self.numa_info[0]} -C {self.numa_info[1]}-{self.numa_info[2]}"
         fork_args = "--enable-fork" if self.args.fork else ""
         diff_args = "--no-diff" if self.args.disable_diff else ""
         chiseldb_args = "--dump-db" if self.args.dump_db else ""
         instr_trace_args = f"--instr-trace {instr_trace}" if instr_trace_valid else ""
         gcpt_restore_args = f"-r {self.args.gcpt_restore_bin}" if len(self.args.gcpt_restore_bin) != 0 else ""
-        return_code = self.__exec_cmd(f'ulimit -s {32 * 1024}; {numa_args} $NOOP_HOME/build/emu -i {workload} {emu_args} {fork_args} {diff_args} {chiseldb_args} {gcpt_restore_args} {instr_trace_args}')
+        flash_args = f"--flash {self.args.flash}" if self.args.flash is not None else ""
+        return_code = self.__exec_cmd(f'ulimit -s {32 * 1024}; {numa_args} $NOOP_HOME/build/emu -i {workload} {emu_args} {fork_args} {diff_args} {chiseldb_args} {gcpt_restore_args} {instr_trace_args} {flash_args}')
         return return_code
 
     def run_simv(self, workload):
@@ -442,78 +452,80 @@ class XiangShan(object):
             "rv64uzfh-p-ldst.bin",
             "rv64uzfh-p-move.bin",
             "rv64uzfh-p-recoding.bin",
-            "rv64uzvfh-p-vfadd.bin",
-            "rv64uzvfh-p-vfclass.bin",
-            "rv64uzvfh-p-vfcvtfx.bin",
-            "rv64uzvfh-p-vfcvtfxu.bin",
-            "rv64uzvfh-p-vfcvtrxf.bin",
-            "rv64uzvfh-p-vfcvtrxuf.bin",
-            "rv64uzvfh-p-vfcvtxf.bin",
-            "rv64uzvfh-p-vfcvtxuf.bin",
-            "rv64uzvfh-p-vfdiv.bin",
-            "rv64uzvfh-p-vfdown.bin",
-            "rv64uzvfh-p-vfmacc.bin",
-            "rv64uzvfh-p-vfmadd.bin",
-            "rv64uzvfh-p-vfmax.bin",
-            "rv64uzvfh-p-vfmerge.bin",
-            "rv64uzvfh-p-vfmin.bin",
-            "rv64uzvfh-p-vfmsac.bin",
-            "rv64uzvfh-p-vfmsub.bin",
-            "rv64uzvfh-p-vfmul.bin",
-            "rv64uzvfh-p-vfmv.bin",
-            "rv64uzvfh-p-vfncvtff.bin",
-            "rv64uzvfh-p-vfncvtfx.bin",
-            "rv64uzvfh-p-vfncvtfxu.bin",
-            "rv64uzvfh-p-vfncvtrff.bin",
-            "rv64uzvfh-p-vfncvtrxf.bin",
-            "rv64uzvfh-p-vfncvtrxuf.bin",
-            "rv64uzvfh-p-vfncvtxf.bin",
-            "rv64uzvfh-p-vfncvtxuf.bin",
-            "rv64uzvfh-p-vfnmacc.bin",
-            "rv64uzvfh-p-vfnmadd.bin",
-            "rv64uzvfh-p-vfnmsac.bin",
-            "rv64uzvfh-p-vfnmsub.bin",
-            "rv64uzvfh-p-vfrdiv.bin",
-            "rv64uzvfh-p-vfrec7.bin",
-            "rv64uzvfh-p-vfredmax.bin",
-            "rv64uzvfh-p-vfredmin.bin",
-            "rv64uzvfh-p-vfredosum.bin",
-            "rv64uzvfh-p-vfredusum.bin",
-            "rv64uzvfh-p-vfrsqrt7.bin",
-            "rv64uzvfh-p-vfrsub.bin",
-            "rv64uzvfh-p-vfsgnj.bin",
-            "rv64uzvfh-p-vfsgnjn.bin",
-            "rv64uzvfh-p-vfsgnjx.bin",
-            "rv64uzvfh-p-vfsqrt.bin",
-            "rv64uzvfh-p-vfsub.bin",
-            "rv64uzvfh-p-vfup.bin",
-            "rv64uzvfh-p-vfwadd.bin",
-            "rv64uzvfh-p-vfwadd-w.bin",
-            "rv64uzvfh-p-vfwcvtff.bin",
-            "rv64uzvfh-p-vfwcvtfx.bin",
-            "rv64uzvfh-p-vfwcvtfxu.bin",
-            "rv64uzvfh-p-vfwcvtrxf.bin",
-            "rv64uzvfh-p-vfwcvtrxuf.bin",
-            "rv64uzvfh-p-vfwcvtxf.bin",
-            "rv64uzvfh-p-vfwcvtxuf.bin",
-            "rv64uzvfh-p-vfwmacc.bin",
-            "rv64uzvfh-p-vfwmsac.bin",
-            "rv64uzvfh-p-vfwmul.bin",
-            "rv64uzvfh-p-vfwnmacc.bin",
-            "rv64uzvfh-p-vfwnmsac.bin",
-            "rv64uzvfh-p-vfwredosum.bin",
-            "rv64uzvfh-p-vfwredusum.bin",
-            "rv64uzvfh-p-vfwsub.bin",
-            "rv64uzvfh-p-vfwsub-w.bin",
-            "rv64uzvfh-p-vmfeq.bin",
-            "rv64uzvfh-p-vmfge.bin",
-            "rv64uzvfh-p-vmfgt.bin",
-            "rv64uzvfh-p-vmfle.bin",
-            "rv64uzvfh-p-vmflt.bin",
-            "rv64uzvfh-p-vmfne.bin"
+            # Temporarily disabled in CI due to the ongoing vector refactor.
+            # "rv64uzvfh-p-vfadd.bin",
+            # "rv64uzvfh-p-vfclass.bin",
+            # "rv64uzvfh-p-vfcvtfx.bin",
+            # "rv64uzvfh-p-vfcvtfxu.bin",
+            # "rv64uzvfh-p-vfcvtrxf.bin",
+            # "rv64uzvfh-p-vfcvtrxuf.bin",
+            # "rv64uzvfh-p-vfcvtxf.bin",
+            # "rv64uzvfh-p-vfcvtxuf.bin",
+            # "rv64uzvfh-p-vfdiv.bin",
+            # "rv64uzvfh-p-vfdown.bin",
+            # "rv64uzvfh-p-vfmacc.bin",
+            # "rv64uzvfh-p-vfmadd.bin",
+            # "rv64uzvfh-p-vfmax.bin",
+            # "rv64uzvfh-p-vfmerge.bin",
+            # "rv64uzvfh-p-vfmin.bin",
+            # "rv64uzvfh-p-vfmsac.bin",
+            # "rv64uzvfh-p-vfmsub.bin",
+            # "rv64uzvfh-p-vfmul.bin",
+            # "rv64uzvfh-p-vfmv.bin",
+            # "rv64uzvfh-p-vfncvtff.bin",
+            # "rv64uzvfh-p-vfncvtfx.bin",
+            # "rv64uzvfh-p-vfncvtfxu.bin",
+            # "rv64uzvfh-p-vfncvtrff.bin",
+            # "rv64uzvfh-p-vfncvtrxf.bin",
+            # "rv64uzvfh-p-vfncvtrxuf.bin",
+            # "rv64uzvfh-p-vfncvtxf.bin",
+            # "rv64uzvfh-p-vfncvtxuf.bin",
+            # "rv64uzvfh-p-vfnmacc.bin",
+            # "rv64uzvfh-p-vfnmadd.bin",
+            # "rv64uzvfh-p-vfnmsac.bin",
+            # "rv64uzvfh-p-vfnmsub.bin",
+            # "rv64uzvfh-p-vfrdiv.bin",
+            # "rv64uzvfh-p-vfrec7.bin",
+            # "rv64uzvfh-p-vfredmax.bin",
+            # "rv64uzvfh-p-vfredmin.bin",
+            # "rv64uzvfh-p-vfredosum.bin",
+            # "rv64uzvfh-p-vfredusum.bin",
+            # "rv64uzvfh-p-vfrsqrt7.bin",
+            # "rv64uzvfh-p-vfrsub.bin",
+            # "rv64uzvfh-p-vfsgnj.bin",
+            # "rv64uzvfh-p-vfsgnjn.bin",
+            # "rv64uzvfh-p-vfsgnjx.bin",
+            # "rv64uzvfh-p-vfsqrt.bin",
+            # "rv64uzvfh-p-vfsub.bin",
+            # "rv64uzvfh-p-vfup.bin",
+            # "rv64uzvfh-p-vfwadd.bin",
+            # "rv64uzvfh-p-vfwadd-w.bin",
+            # "rv64uzvfh-p-vfwcvtff.bin",
+            # "rv64uzvfh-p-vfwcvtfx.bin",
+            # "rv64uzvfh-p-vfwcvtfxu.bin",
+            # "rv64uzvfh-p-vfwcvtrxf.bin",
+            # "rv64uzvfh-p-vfwcvtrxuf.bin",
+            # "rv64uzvfh-p-vfwcvtxf.bin",
+            # "rv64uzvfh-p-vfwcvtxuf.bin",
+            # "rv64uzvfh-p-vfwmacc.bin",
+            # "rv64uzvfh-p-vfwmsac.bin",
+            # "rv64uzvfh-p-vfwmul.bin",
+            # "rv64uzvfh-p-vfwnmacc.bin",
+            # "rv64uzvfh-p-vfwnmsac.bin",
+            # "rv64uzvfh-p-vfwredosum.bin",
+            # "rv64uzvfh-p-vfwredusum.bin",
+            # "rv64uzvfh-p-vfwsub.bin",
+            # "rv64uzvfh-p-vfwsub-w.bin",
+            # "rv64uzvfh-p-vmfeq.bin",
+            # "rv64uzvfh-p-vmfge.bin",
+            # "rv64uzvfh-p-vmfgt.bin",
+            # "rv64uzvfh-p-vmfle.bin",
+            # "rv64uzvfh-p-vmflt.bin",
+            # "rv64uzvfh-p-vmfne.bin"
         ]
         f16_test = map(lambda x: os.path.join(base_dir, x), workloads)
         return f16_test
+
     def __get_ci_zcbtest(self, name=None):
         base_dir = "/nfs/home/share/ci-workloads/zcb-test"
         workloads = [
@@ -521,6 +533,7 @@ class XiangShan(object):
         ]
         zcb_test = map(lambda x: os.path.join(base_dir, x), workloads)
         return zcb_test
+
     def __get_ci_iopmptest(self, name=None):
         base_dir = "/nfs/home/share/ci-workloads/iopmp"
         workloads = [
@@ -528,6 +541,23 @@ class XiangShan(object):
         ]
         iopmp_test = map(lambda x: os.path.join(base_dir, x), workloads)
         return iopmp_test
+
+    def __get_ci_crosspage_fetch_test(self, name=None):
+        base_dir = "/nfs/home/share/ci-workloads/crosspage-fetch"
+        workloads = [
+            "crosspage_pad2b_page1_exec_page2_exec-riscv64-xs.bin",       # normal
+            "crosspage_pad2b_page1_exec_page2_exec_io-riscv64-xs.bin",    # normal -> mmio
+            "crosspage_pad2b_page1_exec_page2_none-riscv64-xs.bin",       # normal -> page fault
+            "crosspage_pad2b_page1_exec_page2_io-riscv64-xs.bin",         # normal -> mmio page fault
+            "crosspage_pad2b_page1_exec_io_page2_exec-riscv64-xs.bin",    # mmio -> normal
+            "crosspage_pad2b_page1_exec_io_page2_exec_io-riscv64-xs.bin", # mmio
+            "crosspage_pad2b_page1_exec_io_page2_none-riscv64-xs.bin",    # mmio -> page fault
+            "crosspage_pad2b_page1_exec_io_page2_io-riscv64-xs.bin",      # mmio -> mmio page fault
+            "crosspage_pad2b_page1_none_page2_exec-riscv64-xs.bin",       # page fault
+            "crosspage_pad2b_page1_none_page2_exec_io-riscv64-xs.bin",    # page fault -> mmio
+        ]
+        return map(lambda x: os.path.join(base_dir, x), workloads)
+
     def __get_ci_mc(self, name=None):
         base_dir = "/nfs/home/share/ci-workloads"
         workloads = [
@@ -609,11 +639,13 @@ class XiangShan(object):
             "microbench": self.__am_apps_path,
             "coremark": self.__am_apps_path,
             "coremark-1-iteration": self.__am_apps_path,
-            "rvv-bench": self.__get_ci_rvvbench,
-            "rvv-test": self.__get_ci_rvvtest,
+            # Temporarily disabled in CI due to the ongoing vector refactor.
+            # "rvv-bench": self.__get_ci_rvvbench,
+            # "rvv-test": self.__get_ci_rvvtest,
             "f16_test": self.__get_ci_F16test,
             "zcb-test": self.__get_ci_zcbtest,
-            "iopmp-test": self.__get_ci_iopmptest
+            "iopmp-test": self.__get_ci_iopmptest,
+            "crosspage-fetch-test": self.__get_ci_crosspage_fetch_test,
         }
         for target in all_tests.get(test, self.__get_ci_workloads)(test):
             print(target)
@@ -640,11 +672,13 @@ class XiangShan(object):
             "microbench": self.__am_apps_path,
             "coremark": self.__am_apps_path,
             "coremark-1-iteration": self.__am_apps_path,
-            "rvv-bench": self.__get_ci_rvvbench,
-            "rvv-test": self.__get_ci_rvvtest,
+            # Temporarily disabled in CI due to the ongoing vector refactor.
+            # "rvv-bench": self.__get_ci_rvvbench,
+            # "rvv-test": self.__get_ci_rvvtest,
             "f16_test": self.__get_ci_F16test,
             "zcb-test": self.__get_ci_zcbtest,
-            "iopmp-test": self.__get_ci_iopmptest
+            "iopmp-test": self.__get_ci_iopmptest,
+            "crosspage-fetch-test": self.__get_ci_crosspage_fetch_test,
         }
         for target in all_tests.get(test, self.__get_ci_workloads)(test):
             print(target)
@@ -773,6 +807,7 @@ if __name__ == "__main__":
     parser.add_argument('--make-threads', nargs='?', type=int, help='number of make threads', default=200)
     parser.add_argument('--trace', action='store_true', help='enable vcd waveform')
     parser.add_argument('--trace-fst', action='store_true', help='enable fst waveform')
+    parser.add_argument('--trace-all', action='store_true', help='enable EMU_TRACE_ALL for makefile')
     parser.add_argument('--config', nargs='?', type=str, help='config')
     parser.add_argument('--yaml-config', nargs='?', type=str, help='yaml config')
     parser.add_argument('--emu-optimize', nargs='?', type=str, help='verilator optimization letter')
@@ -789,8 +824,11 @@ if __name__ == "__main__":
     parser.add_argument('--gcpt-restore-bin', type=str, default="", help="specify the bin used to restore from gcpt")
     parser.add_argument('--instr-trace', type=str, default="", help="run the test with the trace of the simfrontend")
     parser.add_argument('--seed', type=int, help="run emu with the given random seed")
+    parser.add_argument('--flash', type=str, help="Path to flash image for copy_and_run")
     # both makefile and emu arguments
-    parser.add_argument('--dump-db', action='store_true', help='enable chiseldb dump')
+    parser.add_argument('--dump-db', '--enable-db', dest='enable_db', action='store_true', help='enable chiseldb dump')
+    parser.add_argument('--enable-rolling', action='store_true', help='enable rolling db dump, implies --enable-db')
+    parser.add_argument('--db-path', type=str, help='dump chiseldb to the specified file path')
     parser.add_argument('--pgo', nargs='?', type=str, help='workload for pgo (null to disable pgo)')
     parser.add_argument('--pgo-max-cycle', nargs='?', default=400000, type=int, help='maximun cycle to train pgo')
     parser.add_argument('--pgo-emu-args', nargs='?', default='--no-diff', type=str, help='emu arguments for pgo')

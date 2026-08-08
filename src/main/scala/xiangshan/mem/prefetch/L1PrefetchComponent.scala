@@ -9,7 +9,6 @@ import xiangshan._
 import xiangshan.backend.fu.PMPRespBundle
 import xiangshan.cache.HasDCacheParameters
 import xiangshan.cache.mmu._
-import xiangshan.mem.Bundles.LsPrefetchTrainBundle
 import xiangshan.mem.{L1PrefetchReq, L1PrefetchSource}
 
 case class StreamStrideParams() extends PrefetcherParams{
@@ -104,157 +103,9 @@ trait HasL1PrefetchHelper extends HasCircularQueuePtrHelper with HasDCacheParame
   }
 }
 
-trait HasTrainFilterHelper extends HasCircularQueuePtrHelper {
-  def reorder[T <: LsPrefetchTrainBundle](source: Vec[ValidIO[T]]): Vec[ValidIO[T]] = {
-    if(source.length == 1) {
-      source
-    }else if(source.length == 2) {
-      val source_v = source.map(_.valid)
-      val res = Wire(source.cloneType)
-      // source 1 is older than source 0 (only when source0/1 are both valid)
-      val source_1_older = Mux(Cat(source_v).andR,
-        isBefore(source(1).bits.uop.robIdx, source(0).bits.uop.robIdx),
-        false.B
-      )
-      when(source_1_older) {
-        res(0) := source(1)
-        res(1) := source(0)
-      }.otherwise {
-        res := source
-      }
-
-      res
-    }else if(source.length == 3) {
-      // TODO: generalize
-      val res_0_1 = Reg(source.cloneType)
-      val res_1_2 = Reg(source.cloneType)
-      val res = Reg(source.cloneType)
-
-      val tmp = reorder(VecInit(source.slice(0, 2)))
-      res_0_1(0) := tmp(0)
-      res_0_1(1) := tmp(1)
-      res_0_1(2) := source(2)
-      val tmp_1 = reorder(VecInit(res_0_1.slice(1, 3)))
-      res_1_2(0) := res_0_1(0)
-      res_1_2(1) := tmp_1(0)
-      res_1_2(2) := tmp_1(1)
-      val tmp_2 = reorder(VecInit(res_1_2.slice(0, 2)))
-      res(0) := tmp_2(0)
-      res(1) := tmp_2(1)
-      res(2) := res_1_2(2)
-
-      res
-    }else {
-      require(false, "for now, 4 or more sources are invalid")
-      source
-    }
-  }
-}
-
-// get prefetch train reqs from `exuParameters.LduCnt` load pipelines (up to `exuParameters.LduCnt`/cycle)
-// filter by cache line address, send out train req to stride (up to 1 req/cycle)
-class TrainFilter(size: Int, name: String)(implicit p: Parameters) extends XSModule with HasL1PrefetchHelper with HasTrainFilterHelper {
-  val io = IO(new Bundle() {
-    val enable = Input(Bool())
-    val flush = Input(Bool())
-    // train input, only from load for now
-    val ld_in = Flipped(Vec(backendParams.LduCnt, ValidIO(new LsPrefetchTrainBundle())))
-    // filter out
-    val train_req = DecoupledIO(new PrefetchReqBundle())
-  })
-
-  class Ptr(implicit p: Parameters) extends CircularQueuePtr[Ptr]( p => size ){}
-  object Ptr {
-    def apply(f: Bool, v: UInt)(implicit p: Parameters): Ptr = {
-      val ptr = Wire(new Ptr)
-      ptr.flag := f
-      ptr.value := v
-      ptr
-    }
-  }
-
-  val entries = Reg(Vec(size, new PrefetchReqBundle))
-  val valids = RegInit(VecInit(Seq.fill(size){ (false.B) }))
-
-  // enq
-  val enqLen = backendParams.LduCnt
-  val enqPtrExt = RegInit(VecInit((0 until enqLen).map(_.U.asTypeOf(new Ptr))))
-  val deqPtrExt = RegInit(0.U.asTypeOf(new Ptr))
-
-  val deqPtr = WireInit(deqPtrExt.value)
-
-  require(size >= enqLen)
-
-  val ld_in_reordered = reorder(io.ld_in)
-  val reqs_l = ld_in_reordered.map(_.bits.toPrefetchReqBundle())
-  val reqs_vl = ld_in_reordered.map(_.valid)
-  val needAlloc = Wire(Vec(enqLen, Bool()))
-  val canAlloc = Wire(Vec(enqLen, Bool()))
-
-  for(i <- (0 until enqLen)) {
-    val req = reqs_l(i)
-    val req_v = reqs_vl(i)
-    val index = PopCount(needAlloc.take(i))
-    val allocPtr = enqPtrExt(index)
-    val entry_match = Cat(entries.zip(valids).map {
-      case(e, v) => v && block_hash_tag(e.vaddr) === block_hash_tag(req.vaddr)
-    }).orR
-    val prev_enq_match = if(i == 0) false.B else Cat(reqs_l.zip(reqs_vl).take(i).map {
-      case(pre, pre_v) => pre_v && block_hash_tag(pre.vaddr) === block_hash_tag(req.vaddr)
-    }).orR
-
-    needAlloc(i) := req_v && !entry_match && !prev_enq_match
-    canAlloc(i) := needAlloc(i) && allocPtr >= deqPtrExt && io.enable
-
-    when(canAlloc(i)) {
-      valids(allocPtr.value) := true.B
-      entries(allocPtr.value) := req
-    }
-  }
-  val allocNum = PopCount(canAlloc)
-
-  enqPtrExt.foreach{case x => when(canAlloc.asUInt.orR) {x := x + allocNum} }
-
-  // deq
-  io.train_req.valid := false.B
-  io.train_req.bits := DontCare
-  valids.zip(entries).zipWithIndex.foreach {
-    case((valid, entry), i) => {
-      when(deqPtr === i.U) {
-        io.train_req.valid := valid && io.enable
-        io.train_req.bits := entry
-      }
-    }
-  }
-
-  when(io.train_req.fire) {
-    valids(deqPtr) := false.B
-    deqPtrExt := deqPtrExt + 1.U
-  }
-
-  when(RegNext(io.flush)) {
-    valids.foreach {case valid => valid := false.B}
-    (0 until enqLen).map {case i => enqPtrExt(i) := i.U.asTypeOf(new Ptr)}
-    deqPtrExt := 0.U.asTypeOf(new Ptr)
-  }
-
-  XSPerfAccumulate(s"${name}_train_filter_full", PopCount(valids) === size.U)
-  XSPerfAccumulate(s"${name}_train_filter_half", PopCount(valids) >= (size / 2).U)
-  XSPerfAccumulate(s"${name}_train_filter_empty", PopCount(valids) === 0.U)
-
-  val raw_enq_pattern = Cat(reqs_vl)
-  val filtered_enq_pattern = Cat(needAlloc)
-  val actual_enq_pattern = Cat(canAlloc)
-  XSPerfAccumulate(s"${name}_train_filter_enq", allocNum > 0.U)
-  XSPerfAccumulate(s"${name}_train_filter_deq", io.train_req.fire)
-  for(i <- 0 until (1 << enqLen)) {
-    XSPerfAccumulate(s"${name}_train_filter_raw_enq_pattern_${toBinary(i)}", raw_enq_pattern === i.U)
-    XSPerfAccumulate(s"${name}_train_filter_filtered_enq_pattern_${toBinary(i)}", filtered_enq_pattern === i.U)
-    XSPerfAccumulate(s"${name}_train_filter_actual_enq_pattern_${toBinary(i)}", actual_enq_pattern === i.U)
-  }
-}
-
-class NewTrainFilter(size: Int, name: String, hasLoadTrain: Boolean=true, hasStoreTrain: Boolean=false)(implicit p: Parameters) extends XSModule with HasL1PrefetchHelper {
+// get prefetch train reqs from pipelines
+// filter by cache line address, send out train req up to 1 req/cycle
+class TrainFilter(size: Int, name: String, hasLoadTrain: Boolean=true, hasStoreTrain: Boolean=false)(implicit p: Parameters) extends XSModule with HasL1PrefetchHelper {
   val io = IO(new Bundle() {
     // control
     val enable = Input(Bool()) // FIXME lyq: some doubts about the functionality of enable
@@ -262,10 +113,10 @@ class NewTrainFilter(size: Int, name: String, hasLoadTrain: Boolean=true, hasSto
     // train input: from ldu, stu
 
     val ldTrainOpt = if (hasLoadTrain) {
-      Some(Flipped(Vec(backendParams.LdExuCnt, ValidIO(new LsPrefetchTrainBundle()))))
+      Some(Flipped(Vec(backendParams.LdExuCnt, ValidIO(new TrainReqBundle()))))
     } else None
     val stTrainOpt = if (hasStoreTrain) {
-       Some(Flipped(Vec(backendParams.StaExuCnt, ValidIO(new LsPrefetchTrainBundle()))))
+       Some(Flipped(Vec(backendParams.StaExuCnt, ValidIO(new TrainReqBundle()))))
     } else None
     // filter output
     val trainReq = DecoupledIO(new TrainReqBundle())
@@ -285,15 +136,17 @@ class NewTrainFilter(size: Int, name: String, hasLoadTrain: Boolean=true, hasSto
   val deqPtr = WireInit(deqPtrExt.value)
 
   val ldReorderOpt = io.ldTrainOpt.map { ldTrain =>
-    HwSort(VecInit(ldTrain.map { case x => DataWithPtr(x.valid, x.bits, x.bits.uop.robIdx) }))
+    HwSort(VecInit(ldTrain.map { case x => DataWithPtr(x.valid, x.bits, x.bits.robIdx) }))
   }
   val stReorderOpt = io.stTrainOpt.map { stTrain =>
-    HwSort(VecInit(stTrain.map { case x => DataWithPtr(x.valid, x.bits, x.bits.uop.robIdx) }))
+    HwSort(VecInit(stTrain.map { case x => DataWithPtr(x.valid, x.bits, x.bits.robIdx) }))
   }
-  val reqs = ldReorderOpt.map(_.map(_.bits.toTrainReqBundle())).getOrElse(Seq.empty) ++
-    stReorderOpt.map(_.map(_.bits.toTrainReqBundle())).getOrElse(Seq.empty)
-  val reqsValid = ldReorderOpt.map(_.map(_.valid)).getOrElse(Seq.empty) ++
-    stReorderOpt.map(_.map(_.valid)).getOrElse(Seq.empty)
+  val ldReorderBufferedOpt = ldReorderOpt.map(reorder => RegNext(reorder, 0.U.asTypeOf(reorder)))
+  val stReorderBufferedOpt = stReorderOpt.map(reorder => RegNext(reorder, 0.U.asTypeOf(reorder)))
+  val reqs = ldReorderBufferedOpt.map(_.map(_.bits)).getOrElse(Seq.empty) ++
+    stReorderBufferedOpt.map(_.map(_.bits)).getOrElse(Seq.empty)
+  val reqsValid = ldReorderBufferedOpt.map(_.map(_.valid)).getOrElse(Seq.empty) ++
+    stReorderBufferedOpt.map(_.map(_.valid)).getOrElse(Seq.empty)
 
   val needAlloc = Wire(Vec(enqLen, Bool()))
   val canAlloc = Wire(Vec(enqLen, Bool()))
@@ -367,7 +220,6 @@ class MLPReqFilterBundle(implicit p: Parameters) extends XSBundle with HasL1Pref
   val bit_vec = UInt(BIT_VEC_WITDH.W)
   val sent_vec = UInt(BIT_VEC_WITDH.W)
   val sink = UInt(SINK_BITS.W)
-  val alias = UInt(2.W)
   val is_vaddr = Bool()
   val source = new L1PrefetchSource()
   val debug_va_region = UInt(REGION_TAG_BITS.W)
@@ -379,7 +231,6 @@ class MLPReqFilterBundle(implicit p: Parameters) extends XSBundle with HasL1Pref
     bit_vec := 0.U
     sent_vec := 0.U
     sink := SINK_L1
-    alias := 0.U
     is_vaddr := false.B
     source.value := L1_HW_PREFETCH_NULL
     debug_va_region := 0.U
@@ -402,7 +253,11 @@ class MLPReqFilterBundle(implicit p: Parameters) extends XSBundle with HasL1Pref
   }
 
   def can_send_pf(valid: Bool): Bool = {
-    !is_vaddr && (bit_vec & ~sent_vec).orR && valid
+    can_send_pf(valid, sent_vec)
+  }
+
+  def can_send_pf(valid: Bool, forward_sent_vec: UInt): Bool = {
+    !is_vaddr && (bit_vec & ~forward_sent_vec).orR && valid
   }
 
   def may_be_replace(valid: Bool): Bool = {
@@ -410,16 +265,16 @@ class MLPReqFilterBundle(implicit p: Parameters) extends XSBundle with HasL1Pref
     !valid || RegNext(PopCount(sent_vec) === BIT_VEC_WITDH.U)
   }
 
-  def get_pf_addr(): UInt = {
+  def get_pf_paddr(forward_sent_vec: UInt): UInt = {
     require(PAddrBits <= VAddrBits)
     require((region.getWidth + REGION_BITS + BLOCK_OFFSET) == VAddrBits)
 
-    val candidate = PriorityEncoder(bit_vec & ~sent_vec).asTypeOf(UInt(REGION_BITS.W))
+    val candidate = PriorityEncoder(bit_vec & ~forward_sent_vec).asTypeOf(UInt(REGION_BITS.W))
     Cat(region, candidate, 0.U(BLOCK_OFFSET.W))
   }
 
-  def get_pf_debug_vaddr(): UInt = {
-    val candidate = PriorityEncoder(bit_vec & ~sent_vec).asTypeOf(UInt(REGION_BITS.W))
+  def get_pf_vaddr(forward_sent_vec: UInt): UInt = {
+    val candidate = PriorityEncoder(bit_vec & ~forward_sent_vec).asTypeOf(UInt(REGION_BITS.W))
     Cat(debug_va_region, candidate, 0.U(BLOCK_OFFSET.W))
   }
 
@@ -429,7 +284,6 @@ class MLPReqFilterBundle(implicit p: Parameters) extends XSBundle with HasL1Pref
   }
 
   def fromStreamPrefetchReqBundle(x : StreamPrefetchReqBundle): MLPReqFilterBundle = {
-    require(PAGE_OFFSET >= REGION_TAG_OFFSET, "region is greater than 4k, alias bit may be incorrect")
 
     val res = Wire(new MLPReqFilterBundle)
     res.tag := region_hash_tag(x.region)
@@ -439,7 +293,6 @@ class MLPReqFilterBundle(implicit p: Parameters) extends XSBundle with HasL1Pref
     res.sink := x.sink
     res.is_vaddr := true.B
     res.source := x.source
-    res.alias := x.region(PAGE_OFFSET - REGION_TAG_OFFSET + 1, PAGE_OFFSET - REGION_TAG_OFFSET)
     res.debug_va_region := x.region
     res.confidence := x.confidence
 
@@ -469,8 +322,8 @@ class MutiLevelPrefetchFilter(implicit p: Parameters) extends XSModule with HasL
     val tlb_req = new TlbRequestIO(nRespDups = 2)
     val pmp_resp = Flipped(new PMPRespBundle())
     val l1_req = DecoupledIO(new L1PrefetchReq())
-    val l2_pf_addr = ValidIO(new L2PrefetchReq())
-    val l3_pf_addr = ValidIO(new L3PrefetchReq())
+    val l2_pf_addr = DecoupledIO(new L2PrefetchReq())
+    val l3_pf_addr = DecoupledIO(new L3PrefetchReq())
     val l2PfqBusy = Input(Bool())
   })
 
@@ -509,12 +362,13 @@ class MutiLevelPrefetchFilter(implicit p: Parameters) extends XSModule with HasL
 
   val l1_replacement = new ValidPseudoLRU(MLP_L1_SIZE)
   val l2_replacement = new ValidPseudoLRU(MLP_L2L3_SIZE)
-  val tlb_req_arb = Module(new RRArbiterInit(new TlbReq, MLP_SIZE))
-  val l1_pf_req_arb = Module(new RRArbiterInit(new Bundle {
+  val l1_tlb_req_arb = Module(new RRArbiterInit(new TlbReq, MLP_L1_SIZE))
+  val l2_tlb_req_arb = Module(new RRArbiterInit(new TlbReq, MLP_L2L3_SIZE))
+  val l1_pf_req_arb = Module(new TwoLevelRRArbiter(new Bundle {
     val req = new L1PrefetchReq
     val debug_vaddr = UInt(VAddrBits.W)
   }, MLP_L1_SIZE))
-  val l2_pf_req_arb = Module(new RRArbiterInit(new Bundle {
+  val l2_pf_req_arb = Module(new TwoLevelRRArbiter(new Bundle {
     val req = new L2PrefetchReq
     val debug_vaddr = UInt(VAddrBits.W)
   }, MLP_L2L3_SIZE))
@@ -684,38 +538,50 @@ class MutiLevelPrefetchFilter(implicit p: Parameters) extends XSModule with HasL
 
   // tlb req
   // s0: arb all tlb reqs
-  val s0_tlb_fire_vec = VecInit((0 until MLP_SIZE).map{case i => tlb_req_arb.io.in(i).fire})
+  val s0_tlb_fire_vec = VecInit(l1_tlb_req_arb.io.in.map(_.fire) ++ l2_tlb_req_arb.io.in.map(_.fire))
   val s1_tlb_fire_vec = GatedValidRegNext(s0_tlb_fire_vec)
   val s2_tlb_fire_vec = GatedValidRegNext(s1_tlb_fire_vec)
   val s3_tlb_fire_vec = GatedValidRegNext(s2_tlb_fire_vec)
   val not_tlbing_vec = VecInit((0 until MLP_SIZE).map{case i =>
     !s1_tlb_fire_vec(i) && !s2_tlb_fire_vec(i) && !s3_tlb_fire_vec(i)
   })
-
-  for(i <- 0 until MLP_SIZE) {
+  for(i <- 0 until MLP_L1_SIZE) {
     val l1_evict = s1_l1_alloc && (s1_l1_index === i.U)
-    val l2_evict = s1_l2_alloc && ((s1_l2_index + MLP_L1_SIZE.U) === i.U)
-    if(i < MLP_L1_SIZE) {
-      tlb_req_arb.io.in(i).valid := l1_valids(i) && l1_array(i).is_vaddr && not_tlbing_vec(i) && !l1_evict
-      tlb_req_arb.io.in(i).bits.vaddr := l1_array(i).get_tlb_va()
-    }else {
-      tlb_req_arb.io.in(i).valid := l2_valids(i - MLP_L1_SIZE) && l2_array(i - MLP_L1_SIZE).is_vaddr && not_tlbing_vec(i) && !l2_evict
-      tlb_req_arb.io.in(i).bits.vaddr := l2_array(i - MLP_L1_SIZE).get_tlb_va()
-    }
-    tlb_req_arb.io.in(i).bits.cmd := TlbCmd.read
-    tlb_req_arb.io.in(i).bits.isPrefetch := true.B
-    tlb_req_arb.io.in(i).bits.size := 3.U
-    tlb_req_arb.io.in(i).bits.kill := false.B
-    tlb_req_arb.io.in(i).bits.no_translate := false.B
-    tlb_req_arb.io.in(i).bits.fullva := 0.U
-    tlb_req_arb.io.in(i).bits.checkfullva := false.B
-    tlb_req_arb.io.in(i).bits.memidx := DontCare
-    tlb_req_arb.io.in(i).bits.debug := DontCare
-    tlb_req_arb.io.in(i).bits.hlvx := DontCare
-    tlb_req_arb.io.in(i).bits.hyperinst := DontCare
-    tlb_req_arb.io.in(i).bits.pmp_addr  := DontCare
+    l1_tlb_req_arb.io.in(i).valid := l1_valids(i) && l1_array(i).is_vaddr && not_tlbing_vec(i) && !l1_evict
+    l1_tlb_req_arb.io.in(i).bits.vaddr := l1_array(i).get_tlb_va()
+    l1_tlb_req_arb.io.in(i).bits.cmd := TlbCmd.read
+    l1_tlb_req_arb.io.in(i).bits.isPrefetch := true.B
+    l1_tlb_req_arb.io.in(i).bits.size := 3.U
+    l1_tlb_req_arb.io.in(i).bits.kill := false.B
+    l1_tlb_req_arb.io.in(i).bits.no_translate := false.B
+    l1_tlb_req_arb.io.in(i).bits.fullva := 0.U
+    l1_tlb_req_arb.io.in(i).bits.checkfullva := false.B
+    l1_tlb_req_arb.io.in(i).bits.memidx := DontCare
+    l1_tlb_req_arb.io.in(i).bits.debug := DontCare
+    l1_tlb_req_arb.io.in(i).bits.hlvx := DontCare
+    l1_tlb_req_arb.io.in(i).bits.hyperinst := DontCare
+    l1_tlb_req_arb.io.in(i).bits.pmp_addr  := DontCare
   }
-
+  for(i <- 0 until MLP_L2L3_SIZE) {
+    val l2_evict = s1_l2_alloc && (s1_l2_index === i.U)
+    l2_tlb_req_arb.io.in(i).valid := l2_valids(i) && l2_array(i).is_vaddr && not_tlbing_vec(i + MLP_L1_SIZE) && !l2_evict
+    l2_tlb_req_arb.io.in(i).bits.vaddr := l2_array(i).get_tlb_va()
+    l2_tlb_req_arb.io.in(i).bits.cmd := TlbCmd.read
+    l2_tlb_req_arb.io.in(i).bits.isPrefetch := true.B
+    l2_tlb_req_arb.io.in(i).bits.size := 3.U
+    l2_tlb_req_arb.io.in(i).bits.kill := false.B
+    l2_tlb_req_arb.io.in(i).bits.no_translate := false.B
+    l2_tlb_req_arb.io.in(i).bits.fullva := 0.U
+    l2_tlb_req_arb.io.in(i).bits.checkfullva := false.B
+    l2_tlb_req_arb.io.in(i).bits.memidx := DontCare
+    l2_tlb_req_arb.io.in(i).bits.debug := DontCare
+    l2_tlb_req_arb.io.in(i).bits.hlvx := DontCare
+    l2_tlb_req_arb.io.in(i).bits.hyperinst := DontCare
+    l2_tlb_req_arb.io.in(i).bits.pmp_addr  := DontCare
+  }
+  val tlb_req_arb = Module(new RRArbiterInit(new TlbReq, 2))
+  tlb_req_arb.io.in(0) <> l1_tlb_req_arb.io.out
+  tlb_req_arb.io.in(1) <> l2_tlb_req_arb.io.out
   assert(PopCount(s0_tlb_fire_vec) <= 1.U, "s0_tlb_fire_vec should be one-hot or empty")
 
   // s1: send out the req
@@ -745,7 +611,9 @@ class MutiLevelPrefetchFilter(implicit p: Parameters) extends XSModule with HasL
   val s3_tlb_resp_valid = RegNext(s2_tlb_resp_valid)
   val s3_tlb_resp = RegEnable(s2_tlb_resp, s2_tlb_resp_valid)
   val s3_tlb_update_index = RegEnable(s2_tlb_update_index, s2_tlb_resp_valid)
-  val s3_tlb_evict = RegNext(s2_tlb_evict)
+  val s3_l1_tlb_evict = s1_l1_alloc && (s1_l1_index === s3_tlb_update_index)
+  val s3_l2_tlb_evict = s1_l2_alloc && ((s1_l2_index + MLP_L1_SIZE.U) === s3_tlb_update_index)
+  val s3_tlb_evict = RegNext(s2_tlb_evict) || s3_l1_tlb_evict || s3_l2_tlb_evict
   val s3_pmp_resp = io.pmp_resp
   val s3_update_valid = s3_tlb_resp_valid && !s3_tlb_evict && !s3_tlb_resp.miss
   val s3_drop = s3_update_valid && (
@@ -791,6 +659,10 @@ class MutiLevelPrefetchFilter(implicit p: Parameters) extends XSModule with HasL
   XSPerfAccumulate("s3_tlb_resp_uncache", s3_update_valid && (Pbmt.isUncache(s3_tlb_resp.pbmt.head) || s3_pmp_resp.mmio))
 
   // l1 pf
+  val s1_pf_valid = Reg(Bool())
+  val s1_l1_pf_chosen_oh = RegInit(0.U(MLP_L1_SIZE.W))
+  val s1_l1_pf_candidate_oh = RegInit(0.U(BIT_VEC_WITDH.W))
+
   // s0: generate prefetch req paddr per entry, arb them
   val s0_pf_fire_vec = VecInit((0 until MLP_L1_SIZE).map{case i => l1_pf_req_arb.io.in(i).fire})
   val s1_pf_fire_vec = GatedValidRegNext(s0_pf_fire_vec)
@@ -801,27 +673,31 @@ class MutiLevelPrefetchFilter(implicit p: Parameters) extends XSModule with HasL
 
   for(i <- 0 until MLP_L1_SIZE) {
     val evict = s1_l1_alloc && (s1_l1_index === i.U)
-    l1_pf_req_arb.io.in(i).valid := l1_array(i).can_send_pf(l1_valids(i)) && l1_array(i).sink === SINK_L1 && !evict
-    l1_pf_req_arb.io.in(i).bits.req.paddr := l1_array(i).get_pf_addr()
-    l1_pf_req_arb.io.in(i).bits.req.alias := l1_array(i).alias
+    val issue_forward_sent_vec = Mux(s1_pf_valid && s1_l1_pf_chosen_oh(i), s1_l1_pf_candidate_oh, 0.U)
+    val forward_sent_vec = l1_array(i).sent_vec | issue_forward_sent_vec
+    l1_pf_req_arb.io.in(i).valid := l1_array(i).can_send_pf(l1_valids(i), forward_sent_vec) &&
+      l1_array(i).sink === SINK_L1 && !evict
+    l1_pf_req_arb.io.in(i).bits.req.paddr := l1_array(i).get_pf_paddr(forward_sent_vec)
+    l1_pf_req_arb.io.in(i).bits.req.vaddr := l1_array(i).get_pf_vaddr(forward_sent_vec)
     l1_pf_req_arb.io.in(i).bits.req.confidence := l1_array(i).confidence
     l1_pf_req_arb.io.in(i).bits.req.is_store := false.B
     l1_pf_req_arb.io.in(i).bits.req.pf_source := l1_array(i).source
-    l1_pf_req_arb.io.in(i).bits.debug_vaddr := l1_array(i).get_pf_debug_vaddr()
+    l1_pf_req_arb.io.in(i).bits.debug_vaddr := l1_array(i).get_pf_vaddr(forward_sent_vec)
   }
 
-  when(s0_pf_fire) {
-    l1_array(s0_pf_index).sent_vec := l1_array(s0_pf_index).sent_vec | s0_pf_candidate_oh
-  }
 
   assert(PopCount(s0_pf_fire_vec) <= 1.U, "s0_pf_fire_vec should be one-hot or empty")
 
-  // s1: send out to dcache
-  val s1_pf_valid = Reg(Bool())
+  // s1: send out to dcache and update sent_vec
   val s1_pf_bits = RegEnable(l1_pf_req_arb.io.out.bits, l1_pf_req_arb.io.out.fire)
   val s1_pf_index = RegEnable(s0_pf_index, l1_pf_req_arb.io.out.fire)
   val s1_pf_can_go = io.l1_req.ready
   val s1_pf_fire = s1_pf_valid && s1_pf_can_go
+
+  when(l1_pf_req_arb.io.out.fire) {
+    s1_l1_pf_chosen_oh := l1_pf_req_arb.io.chosenOH
+    s1_l1_pf_candidate_oh := s0_pf_candidate_oh
+  }
 
   when(s1_pf_can_go) {
     s1_pf_valid := false.B
@@ -837,30 +713,62 @@ class MutiLevelPrefetchFilter(implicit p: Parameters) extends XSModule with HasL
 
   l1_pf_req_arb.io.out.ready := s1_pf_can_go || !s1_pf_valid
 
+  for (i <- 0 until MLP_L1_SIZE) {
+    val evict = s1_l1_alloc && (s1_l1_index === i.U)
+    when(s1_pf_fire && s1_l1_pf_chosen_oh(i) && !evict) {
+      l1_array(i).sent_vec := l1_array(i).sent_vec | s1_l1_pf_candidate_oh
+    }
+  }
+
   XSPerfAccumulate("s1_pf_valid", s1_pf_valid)
   XSPerfAccumulate("s1_pf_block_by_pipe_unready", s1_pf_valid && !io.l1_req.ready)
   XSPerfAccumulate("s1_pf_fire", s1_pf_fire)
 
   // l2 pf
+  val s1_l2_pf_valid = Wire(Bool())
+  val s1_l2_pf_chosen_oh = RegInit(0.U(MLP_L2L3_SIZE.W))
+  val s1_l2_pf_candidate_oh = RegInit(0.U(BIT_VEC_WITDH.W))
+
+  val s1_l3_pf_valid = Wire(Bool())
+  val s1_l3_pf_fire = Wire(Bool())
+  val s1_l3_pf_chosen_oh = RegInit(0.U(MLP_L2L3_SIZE.W))
+  val s1_l3_pf_candidate_oh = RegInit(0.U(BIT_VEC_WITDH.W))
+
   // s0: generate prefetch req paddr per entry, arb them, sent out
-  io.l2_pf_addr.valid := l2_pf_req_arb.io.out.valid
-  io.l2_pf_addr.bits := l2_pf_req_arb.io.out.bits.req
-
-  l2_pf_req_arb.io.out.ready := true.B
-
   for(i <- 0 until MLP_L2L3_SIZE) {
     val evict = s1_l2_alloc && (s1_l2_index === i.U)
-    l2_pf_req_arb.io.in(i).valid := l2_array(i).can_send_pf(l2_valids(i)) && (l2_array(i).sink === SINK_L2) && !evict
-    l2_pf_req_arb.io.in(i).bits.req.addr := l2_array(i).get_pf_addr()
+    val issue_forward_sent_vec = Mux(s1_l2_pf_valid && s1_l2_pf_chosen_oh(i), s1_l2_pf_candidate_oh, 0.U) |
+      Mux(s1_l3_pf_valid && s1_l3_pf_chosen_oh(i), s1_l3_pf_candidate_oh, 0.U)
+    val forward_sent_vec = l2_array(i).sent_vec | issue_forward_sent_vec
+    l2_pf_req_arb.io.in(i).valid := l2_array(i).can_send_pf(l2_valids(i), forward_sent_vec) &&
+      (l2_array(i).sink === SINK_L2) && !evict
+    l2_pf_req_arb.io.in(i).bits.req.addr := l2_array(i).get_pf_paddr(forward_sent_vec)
     l2_pf_req_arb.io.in(i).bits.req.source := MuxLookup(l2_array(i).source.value, MemReqSource.Prefetch2L2Unknown.id.U)(Seq(
       L1_HW_PREFETCH_STRIDE -> MemReqSource.Prefetch2L2Stride.id.U,
       L1_HW_PREFETCH_STREAM -> MemReqSource.Prefetch2L2Stream.id.U
     ))
-    l2_pf_req_arb.io.in(i).bits.debug_vaddr := l2_array(i).get_pf_debug_vaddr()
+    l2_pf_req_arb.io.in(i).bits.debug_vaddr := l2_array(i).get_pf_vaddr(forward_sent_vec)
   }
 
+  // s1: send out to l2 and update sent_vec
+  s1_l2_pf_valid := RegNext(l2_pf_req_arb.io.out.valid)
+  val s1_l2_pf_fire = s1_l2_pf_valid && io.l2_pf_addr.ready
+
   when(l2_pf_req_arb.io.out.valid) {
-    l2_array(l2_pf_req_arb.io.chosen).sent_vec := l2_array(l2_pf_req_arb.io.chosen).sent_vec | get_candidate_oh(l2_pf_req_arb.io.out.bits.req.addr)
+    s1_l2_pf_chosen_oh := l2_pf_req_arb.io.chosenOH
+    s1_l2_pf_candidate_oh := get_candidate_oh(l2_pf_req_arb.io.out.bits.req.addr)
+  }
+  io.l2_pf_addr.valid := s1_l2_pf_valid
+  io.l2_pf_addr.bits := RegEnable(l2_pf_req_arb.io.out.bits.req, l2_pf_req_arb.io.out.valid)
+
+  l2_pf_req_arb.io.out.ready := io.l2_pf_addr.ready
+  for (i <- 0 until MLP_L2L3_SIZE) {
+    val evict = s1_l2_alloc && (s1_l2_index === i.U)
+    val issue_sent_vec = Mux(s1_l2_pf_fire && s1_l2_pf_chosen_oh(i), s1_l2_pf_candidate_oh, 0.U) |
+      Mux(s1_l3_pf_fire && s1_l3_pf_chosen_oh(i), s1_l3_pf_candidate_oh, 0.U)
+    when(issue_sent_vec.orR && !evict) {
+      l2_array(i).sent_vec := l2_array(i).sent_vec | issue_sent_vec
+    }
   }
 
   val stream_out_debug_table = ChiselDB.createTable("StreamPFTraceOut" + p(XSCoreParamsKey).HartId.toString, new StreamPFTraceOutEntry, basicDB = false)
@@ -888,24 +796,32 @@ class MutiLevelPrefetchFilter(implicit p: Parameters) extends XSModule with HasL
 
   // last level cache pf
   // s0: generate prefetch req paddr per entry, arb them, sent out
-  io.l3_pf_addr.valid := l3_pf_req_arb.io.out.valid
-  io.l3_pf_addr.bits := l3_pf_req_arb.io.out.bits
-
-  l3_pf_req_arb.io.out.ready := true.B
+  l3_pf_req_arb.io.out.ready := io.l3_pf_addr.ready
 
   for(i <- 0 until MLP_L2L3_SIZE) {
     val evict = s1_l2_alloc && (s1_l2_index === i.U)
-    l3_pf_req_arb.io.in(i).valid := l2_array(i).can_send_pf(l2_valids(i)) && (l2_array(i).sink === SINK_L3) && !evict
-    l3_pf_req_arb.io.in(i).bits.addr := l2_array(i).get_pf_addr()
+    val issue_forward_sent_vec = Mux(s1_l2_pf_valid && s1_l2_pf_chosen_oh(i), s1_l2_pf_candidate_oh, 0.U) |
+      Mux(s1_l3_pf_valid && s1_l3_pf_chosen_oh(i), s1_l3_pf_candidate_oh, 0.U)
+    val forward_sent_vec = l2_array(i).sent_vec | issue_forward_sent_vec
+    l3_pf_req_arb.io.in(i).valid := l2_array(i).can_send_pf(l2_valids(i), forward_sent_vec) &&
+      (l2_array(i).sink === SINK_L3) && !evict
+    l3_pf_req_arb.io.in(i).bits.addr := l2_array(i).get_pf_paddr(forward_sent_vec)
     l3_pf_req_arb.io.in(i).bits.source := MuxLookup(l2_array(i).source.value, MemReqSource.Prefetch2L3Unknown.id.U)(Seq(
       L1_HW_PREFETCH_STRIDE -> MemReqSource.Prefetch2L3Stride.id.U,
       L1_HW_PREFETCH_STREAM -> MemReqSource.Prefetch2L3Stream.id.U
     ))
   }
 
+  // s1: send out to l3 and update sent_vec
+  s1_l3_pf_valid := RegNext(l3_pf_req_arb.io.out.valid)
+  s1_l3_pf_fire := s1_l3_pf_valid && io.l3_pf_addr.ready
+
   when(l3_pf_req_arb.io.out.valid) {
-    l2_array(l3_pf_req_arb.io.chosen).sent_vec := l2_array(l3_pf_req_arb.io.chosen).sent_vec | get_candidate_oh(l3_pf_req_arb.io.out.bits.addr)
+    s1_l3_pf_chosen_oh := UIntToOH(l3_pf_req_arb.io.chosen)
+    s1_l3_pf_candidate_oh := get_candidate_oh(l3_pf_req_arb.io.out.bits.addr)
   }
+  io.l3_pf_addr.valid := s1_l3_pf_valid
+  io.l3_pf_addr.bits := RegEnable(l3_pf_req_arb.io.out.bits, l3_pf_req_arb.io.out.valid)
 
   // reset meta to avoid muti-hit problem
   for(i <- 0 until MLP_SIZE) {
@@ -932,7 +848,7 @@ class MutiLevelPrefetchFilter(implicit p: Parameters) extends XSModule with HasL
 
 class L1Prefetcher(implicit p: Parameters) extends BasePrefecher with HasStreamPrefetchHelper with HasStridePrefetchHelper {
   val pf_ctrl = IO(Input(Vec(L1PrefetcherNum, new PrefetchControlBundle)))
-  val stride_train = IO(Flipped(Vec(backendParams.LduCnt + backendParams.HyuCnt, ValidIO(new LsPrefetchTrainBundle()))))
+  val stride_train = IO(Flipped(Vec(backendParams.LduCnt + backendParams.HyuCnt, ValidIO(new TrainReqBundle()))))
   val l2PfqBusy = IO(Input(Bool()))
   val strideEnable = IO(Input(Bool()))
 
@@ -948,7 +864,7 @@ class L1Prefetcher(implicit p: Parameters) extends BasePrefecher with HasStreamP
   val stream_pf_ctrl = pf_ctrl(0)
   val stride_pf_ctrl = pf_ctrl(1)
 
-  stream_train_filter.io.ld_in.zipWithIndex.foreach {
+  stream_train_filter.io.ldTrainOpt.get.zipWithIndex.foreach {
     case (ld_in, i) => {
       ld_in.valid := io.ld_in(i).valid && enable
       ld_in.bits := io.ld_in(i).bits
@@ -957,7 +873,7 @@ class L1Prefetcher(implicit p: Parameters) extends BasePrefecher with HasStreamP
   stream_train_filter.io.enable := enable
   stream_train_filter.io.flush := stream_pf_ctrl.flush
 
-  stride_train_filter.io.ld_in.zipWithIndex.foreach {
+  stride_train_filter.io.ldTrainOpt.get.zipWithIndex.foreach {
     case (ld_in, i) => {
       ld_in.valid := stride_train(i).valid && enable
       ld_in.bits := stride_train(i).bits
@@ -970,13 +886,13 @@ class L1Prefetcher(implicit p: Parameters) extends BasePrefecher with HasStreamP
   stream_bit_vec_array.io.flush := stream_pf_ctrl.flush
   stream_bit_vec_array.io.dynamic_depth := stream_pf_ctrl.dynamic_depth
   stream_bit_vec_array.io.confidence := stream_pf_ctrl.confidence
-  stream_bit_vec_array.io.train_req <> stream_train_filter.io.train_req
+  stream_bit_vec_array.io.train_req <> stream_train_filter.io.trainReq
 
   stride_meta_array.io.enable := enable && strideEnable
   stride_meta_array.io.flush := stride_pf_ctrl.flush
   stride_meta_array.io.dynamic_depth := 0.U
   stride_meta_array.io.confidence := stride_pf_ctrl.confidence
-  stride_meta_array.io.train_req <> stride_train_filter.io.train_req
+  stride_meta_array.io.train_req <> stride_train_filter.io.trainReq
   stride_meta_array.io.stream_lookup_req <> stream_bit_vec_array.io.stream_lookup_req
   stride_meta_array.io.stream_lookup_resp <> stream_bit_vec_array.io.stream_lookup_resp
 
@@ -1009,8 +925,10 @@ class L1Prefetcher(implicit p: Parameters) extends BasePrefecher with HasStreamP
   val l2_in_pmem = PmemRanges.map(_.cover(pf_queue_filter.io.l2_pf_addr.bits.addr)).reduce(_ || _)
   io.l2_req.valid := pf_queue_filter.io.l2_pf_addr.valid && l2_in_pmem && enable
   io.l2_req.bits := pf_queue_filter.io.l2_pf_addr.bits
+  pf_queue_filter.io.l2_pf_addr.ready := io.l2_req.ready
 
   val l3_in_pmem = PmemRanges.map(_.cover(pf_queue_filter.io.l3_pf_addr.bits.addr)).reduce(_ || _)
   io.l3_req.valid := pf_queue_filter.io.l3_pf_addr.valid && l3_in_pmem && enable
   io.l3_req.bits := pf_queue_filter.io.l3_pf_addr.bits
+  pf_queue_filter.io.l3_pf_addr.ready := io.l3_req.ready
 }

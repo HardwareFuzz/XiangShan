@@ -384,15 +384,13 @@ class DeltaTable()(implicit p: Parameters) extends BertiModule {
   val stat_update_evictDelta = WireInit(0.S(DeltaWidth.W)) // TODO lyq: have no idea how to output this
   val stat_prefetch_isEntryHit = WireInit(false.B)
   /*** built-in function */
-  // def thresholdOfMax: UInt = (1 << DtCntWidth) - 1
-  // def thresholdOfHalf: UInt = (1 << (DtCntWidth - 1)) - 1
   // def thresholdOfReset: UInt = 16.U 
   // def thresholdOfUpdate: UInt = 10.U 
   // def thresholdOfL1PF: UInt = 8.U 
   // def thresholdOfL2PF: UInt = 5.U 
   // def thresholdOfL2PFR: UInt = 2.U 
-  val thresholdOfReset = Constantin.createRecord(_name+"_thresholdOfReset", 6)   // thresholdOfMax
-  val thresholdOfUpdate = Constantin.createRecord(_name+"_thresholdOfUpdate", 2)  // thresholdOfHalf
+  val thresholdOfReset = Constantin.createRecord(_name+"_thresholdOfReset", 6)    // (1 << DtCntWidth) - 1
+  val thresholdOfUpdate = Constantin.createRecord(_name+"_thresholdOfUpdate", 2)  // (1 << (DtCntWidth - 1))
   val thresholdOfL1PF = Constantin.createRecord(_name+"_thresholdOfL1PF", 4)      // ((1 << DtCntWidth) * 0.65).toInt
   val thresholdOfL2PF = Constantin.createRecord(_name+"_thresholdOfL2PF", 2)      // ((1 << DtCntWidth) * 0.5).toInt
   val thresholdOfL2PFR = Constantin.createRecord(_name+"_thresholdOfL2PFR", 1)    // ((1 << DtCntWidth) * 0.35).toInt
@@ -886,7 +884,7 @@ class DeltaPrefetchBuffer(size: Int, name: String)(implicit p: Parameters) exten
       pfIdxArb.io.out.ready := io.l1_req.ready
       io.l1_req.valid := pfIdxArb.io.out.valid
       io.l1_req.bits.paddr := entries(pfIdx).getPrefetchPA
-      io.l1_req.bits.alias := entries(pfIdx).getPrefetchAlias
+      io.l1_req.bits.vaddr := entries(pfIdx).getPrefetchVA
       io.l1_req.bits.confidence := 1.U
       io.l1_req.bits.is_store := false.B
       io.l1_req.bits.pf_source.value := L1_HW_PREFETCH_BERTI
@@ -939,7 +937,7 @@ class DeltaPrefetchBuffer(size: Int, name: String)(implicit p: Parameters) exten
 class BertiPrefetcher()(implicit p: Parameters) extends BasePrefecher with HasBertiHelper {
   override lazy val io = IO(new BertiPrefetcherIO)
 
-  val trainFilter = Module(new NewTrainFilter(TRAIN_FILTER_SIZE, name, true, true))
+  val trainFilter = Module(new TrainFilter(TRAIN_FILTER_SIZE, name, true, true))
   val historyTable = Module(new HistoryTable())
   val detlaTable = Module(new DeltaTable())
   val prefetchBuffer = Module(new DeltaPrefetchBuffer(PREFETCH_FILTER_SIZE, name))
@@ -956,7 +954,7 @@ class BertiPrefetcher()(implicit p: Parameters) extends BasePrefecher with HasBe
   val trainValid = trainFilter.io.trainReq.valid
   val trainBits = trainFilter.io.trainReq.bits
   val demandMiss = trainValid && trainBits.miss
-  val demandPfHit = trainValid && isFromBerti(trainBits.metaSource)
+  val demandPfHit = trainValid && isFromL1Prefetch(trainBits.metaSource)
 
   historyTable.io.access.valid := demandMiss || demandPfHit
   historyTable.io.access.bits.pc := trainBits.pc

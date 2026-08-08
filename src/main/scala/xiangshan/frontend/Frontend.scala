@@ -87,7 +87,6 @@ class FrontendIO(implicit p: Parameters) extends FrontendBundle {
   val resetInFrontend: Bool = Output(Bool())
 
   // perf
-  val frontendInfo: FrontendPerfInfo         = Output(new FrontendPerfInfo)
   val debugTopDown: FrontendDebugTopDownInfo = Flipped(new FrontendDebugTopDownInfo)
 
   // mbist
@@ -138,9 +137,7 @@ class FrontendInlinedImp(outer: FrontendInlined) extends FrontendInlinedImpBase(
   private val ibuffer      = Module(new IBuffer)
   private val ftq          = Module(new Ftq)
 
-  private val needFlush            = RegNext(io.backend.toFtq.redirect.valid)
-  private val flushControlRedirect = RegNext(io.backend.toFtq.redirect.bits.debugIsCtrl)
-  private val flushMemVioRedirect  = RegNext(io.backend.toFtq.redirect.bits.debugIsMemVio)
+  private val needFlush = RegNext(io.backend.toFtq.redirect.valid)
 
   private val tlbCsr  = DelayN(io.tlbCsr, TlbCsrPortDelay)
   private val csrCtrl = DelayN(io.csrCtrl, CsrCtrlPortDelay)
@@ -172,15 +169,23 @@ class FrontendInlinedImp(outer: FrontendInlined) extends FrontendInlinedImpBase(
           tlbCsr.mbmc.KEYIDEN.asBool,
           tlbCsr.mbmc.CMODE.asBool,
           tlbCsr.priv.imode,
+          tlbCsr.priv.debug,
           pmp.io.pmp,
           pmp.io.pma,
           requestor.req
         )
       } else {
-        checker.apply(tlbCsr.mbmc.CMODE.asBool, tlbCsr.priv.imode, pmp.io.pmp, pmp.io.pma, requestor.req)
+        checker.apply(
+          tlbCsr.mbmc.CMODE.asBool,
+          tlbCsr.priv.imode,
+          tlbCsr.priv.debug,
+          pmp.io.pmp,
+          pmp.io.pma,
+          requestor.req
+        )
       }
     } else {
-      checker.apply(tlbCsr.priv.imode, pmp.io.pmp, pmp.io.pma, requestor.req)
+      checker.apply(tlbCsr.priv.imode, tlbCsr.priv.debug, pmp.io.pmp, pmp.io.pma, requestor.req)
     }
     requestor.resp := checker.resp
   }
@@ -218,21 +223,18 @@ class FrontendInlinedImp(outer: FrontendInlined) extends FrontendInlinedImpBase(
 
   // IFU-Ftq
   ifu.io.fromFtq <> ftq.io.toIfu
-  ftq.io.toIfu.req.ready := ifu.io.fromFtq.req.ready && icache.io.fromFtq.fetchReq.ready
-
   ftq.io.fromIfu <> ifu.io.toFtq
+
   bpu.io.fromFtq <> ftq.io.toBpu
   ftq.io.fromBpu <> bpu.io.toFtq
 
   // ICache-Ftq
   icache.io.fromFtq <> ftq.io.toICache
-  // override fetchReq.ready to sync with Ifu
-  ftq.io.toICache.fetchReq.ready := ifu.io.fromFtq.req.ready && icache.io.fromFtq.fetchReq.ready
+  ftq.io.fromICache.fromMainPipe := icache.io.toFtq.fromMainPipe
   icache.io.flush                := DontCare
 
   // Ifu-ICache
   ifu.io.fromICache <> icache.io.toIfu
-  ifu.io.toICache <> icache.io.fromIfu
 
   // ICache-Backend
   icache.io.csrPfEnable := RegNext(csrCtrl.pf_ctrl.l1I_pf_enable)
@@ -240,17 +242,20 @@ class FrontendInlinedImp(outer: FrontendInlined) extends FrontendInlinedImpBase(
 
   // IFU-Ibuffer
   ifu.io.toIBuffer <> ibuffer.io.in
+  ifu.io.ibufferEmpty := ibuffer.io.empty
 
   ftq.io.fromBackend <> io.backend.toFtq
   io.backend.fromFtq := ftq.io.toBackend
-  io.backend.fromIfu := ifu.io.toBackend
-  io.frontendInfo.bpuInfo <> ftq.io.bpuInfo
+
+  ifu.io.backendEmpty := io.backend.backendEmpty
+  io.backend.fromIfu  := ifu.io.toBackend
 
   ibuffer.io.flush           := needFlush
-  ibuffer.io.controlRedirect := flushControlRedirect
-  ibuffer.io.memVioRedirect  := flushMemVioRedirect
-  ibuffer.io.bpuTopDownInfo  := ftq.io.bpuTopDownInfo
   ibuffer.io.decodeCanAccept := io.backend.canAccept
+
+  // Topdown analysis
+  ifu.io.backendRedirectTopdown     := ftq.io.backendRedirectTopdown
+  ibuffer.io.backendRedirectTopdown := ftq.io.backendRedirectTopdown
 
   io.backend.cfVec <> ibuffer.io.out
   io.backend.stallReason <> ibuffer.io.stallReason
@@ -266,8 +271,7 @@ class FrontendInlinedImp(outer: FrontendInlined) extends FrontendInlinedImpBase(
 
   itlbRepeater1.io.debugTopDown.robHeadVaddr := io.debugTopDown.robHeadVaddr.map(_.toUInt)
 
-  io.frontendInfo.ibufFull := RegNext(ibuffer.io.full)
-  io.resetInFrontend       := reset.asBool
+  io.resetInFrontend := reset.asBool
 
   // PFEvent
   private val pfevent = Module(new PFEvent)
@@ -365,8 +369,8 @@ class FrontendInlinedImp(outer: FrontendInlined) extends FrontendInlinedImpBase(
   XSPerfAccumulate(
     "fetchedCacheLines",
     Mux(
-      icache.io.toIfu.fetchResp.fire,
-      Mux(icache.io.toIfu.fetchResp.bits.doubleline, 2.U, 1.U),
+      icache.io.toIfu.req.valid && icache.io.toIfu.req.ready,
+      Mux(icache.io.toIfu.req.bits(0).perf_isCrossLine, 2.U, 1.U),
       0.U
     )
   )
@@ -374,15 +378,15 @@ class FrontendInlinedImp(outer: FrontendInlined) extends FrontendInlinedImpBase(
   // XSPerfCounters: Frontend Invalid
   XSPerfAccumulate(
     "stallCycles_fetch",
-    !ftq.io.toIfu.req.fire
+    !(icache.io.toIfu.req.valid && icache.io.toIfu.req.ready)
   )
   XSPerfAccumulate(
     "stallCycles_fetch_ftqNotvalid",
-    !ftq.io.toIfu.req.valid
+    !icache.io.toIfu.req.valid
   )
   XSPerfAccumulate(
     "stallCycles_fetch_ifuNotReady",
-    !ifu.io.fromFtq.req.ready
+    !icache.io.toIfu.req.ready
   )
   XSPerfAccumulate(
     "stallCycles_decodeFull",
