@@ -273,7 +273,7 @@ comp:
 	$(MILL) -i xiangshan.test.compile
 
 $(TOP_V): $(SCALA_FILE)
-	mkdir -p $(@D)
+	mkdir -p $(@D) build
 	BUILD_DIR="$(abspath $(BUILD_DIR))" NOOP_HOME="$(abspath .)" \
 	$(TIME_CMD) $(MILL) -i $(MILL_BUILD_ARGS) xiangshan.runMain $(FPGATOP) \
 		--target-dir $(@D) --config $(CONFIG) --issue $(ISSUE) \
@@ -286,7 +286,7 @@ endif
 verilog: $(call docker-deps,$(TOP_V))
 
 $(SIM_TOP_V): $(SCALA_FILE) $(TEST_FILE)
-	mkdir -p $(@D)
+	mkdir -p $(@D) build
 	@echo -e "\n[mill] Generating Verilog files..." > $(TIMELOG)
 	@date -R | tee -a $(TIMELOG)
 	BUILD_DIR="$(abspath $(BUILD_DIR))" NOOP_HOME="$(abspath .)" \
