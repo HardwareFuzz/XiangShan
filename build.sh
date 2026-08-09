@@ -27,7 +27,7 @@ Options:
       --no-coverage      Explicitly disable coverage (default)
 
   Maintenance:
-      --clean            Remove the selected artifact and its build dir
+      --clean            Remove the canonical build and all ISA aliases for this tuple
   -h, --help             Show this help
 
 Artifact naming:
@@ -35,7 +35,9 @@ Artifact naming:
   (tag is optional)
 
 Notes:
-  --isa currently affects naming only; RTL/config is not ISA-specialized.
+  --isa currently affects artifact naming only; RTL/config is not ISA-specialized.
+  rv64f/rv64fd artifacts intentionally reuse the canonical rv64 build output for the
+  same preset/config/core-count/coverage tuple.
 
 Examples:
   ./build.sh --preset unaligned --cores 1
@@ -143,22 +145,33 @@ case "$COV_MODE" in
   *) die "internal: unknown COV_MODE '$COV_MODE'" ;;
 esac
 
-name_base="xiangshan_${ISA}"
+artifact_name_base="xiangshan_${ISA}"
 if [[ -n "$TAG" ]]; then
-  name_base+="_${TAG}"
+  artifact_name_base+="_${TAG}"
 fi
-name_base+="_${CORES}c"
+artifact_name_base+="_${CORES}c"
+
+build_isa="rv64"
+build_name_base="xiangshan_${build_isa}"
+if [[ -n "$TAG" ]]; then
+  build_name_base+="_${TAG}"
+fi
+build_name_base+="_${CORES}c"
 
 OUT_DIR_DEFAULT="${BUILD_ROOT}"
 OUT_DIR="${OUT_DIR_OPT:-${CX_OUT_DIR:-${OUT_DIR:-${OUT_DIR_DEFAULT}}}}"
 
-artifact="$OUT_DIR/${name_base}${cov_suffix}"
-workdir="$BUILD_ROOT/.work/${name_base}${cov_suffix}"
+artifact="$OUT_DIR/${artifact_name_base}${cov_suffix}"
+canonical_artifact="$OUT_DIR/${build_name_base}${cov_suffix}"
+workdir="$BUILD_ROOT/.work/${build_name_base}${cov_suffix}"
 build_meta_file="$workdir/.build-meta"
 
 if [[ $DO_CLEAN -eq 1 ]]; then
-  rm -rf "$workdir" "$artifact"
-  echo "cleaned: $artifact"
+  rv64f_artifact="$OUT_DIR/${artifact_name_base/$ISA/rv64f}${cov_suffix}"
+  rv64fd_artifact="$OUT_DIR/${artifact_name_base/$ISA/rv64fd}${cov_suffix}"
+  rm -rf "$workdir"
+  rm -f "$canonical_artifact" "$rv64f_artifact" "$rv64fd_artifact"
+  echo "cleaned canonical build and ISA aliases: $canonical_artifact"
 fi
 
 mkdir -p "$BUILD_ROOT" "$OUT_DIR"
@@ -181,7 +194,7 @@ for required_arg in --disable-perf --disable-alwaysdb; do
 done
 
 build_meta=$(cat <<EOF
-ISA=${ISA}
+ISA=${build_isa}
 CORES=${CORES}
 RTL_SUFFIX=${RTL_SUFFIX}
 PRESET=${PRESET}
@@ -207,6 +220,9 @@ echo "  NUM_CORES=$CORES"
 echo "  RTL_SUFFIX=$RTL_SUFFIX"
 echo "  target=$target"
 echo "  sim_args=$SIM_ARGS_BUILD"
+if [[ "$ISA" != "$build_isa" ]]; then
+  echo "  artifact ISA tag=$ISA (reuses canonical build ISA=$build_isa)"
+fi
 
 "$MAKE_CMD" -C "$ROOT_DIR" -j"$MAKE_JOBS" \
   BUILD_DIR="$workdir" \
@@ -219,5 +235,8 @@ echo "  sim_args=$SIM_ARGS_BUILD"
 
 bin_path="$workdir/$emu_name"
 [[ -f "$bin_path" ]] || die "expected emulator binary not found: $bin_path"
-cp -f "$bin_path" "$artifact"
+cp -f "$bin_path" "$canonical_artifact"
+if [[ "$artifact" != "$canonical_artifact" ]]; then
+  cp -f "$canonical_artifact" "$artifact"
+fi
 echo "  -> $artifact"
