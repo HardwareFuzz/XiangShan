@@ -27,7 +27,7 @@ Options:
       --no-coverage      Explicitly disable coverage (default)
 
   Maintenance:
-      --clean            Remove the selected artifact and its build dir
+      --clean            Remove the canonical build and all ISA aliases for this tuple
   -h, --help             Show this help
 
 Artifact naming:
@@ -167,24 +167,14 @@ workdir="$BUILD_ROOT/.work/${build_name_base}${cov_suffix}"
 build_meta_file="$workdir/.build-meta"
 
 if [[ $DO_CLEAN -eq 1 ]]; then
-  rm -f "$artifact"
-  if [[ "$ISA" == "$build_isa" ]]; then
-    rm -rf "$workdir"
-    echo "cleaned artifact and canonical build: $artifact"
-  else
-    echo "cleaned alias artifact: $artifact"
-  fi
+  rv64f_artifact="$OUT_DIR/${artifact_name_base/$ISA/rv64f}${cov_suffix}"
+  rv64fd_artifact="$OUT_DIR/${artifact_name_base/$ISA/rv64fd}${cov_suffix}"
+  rm -rf "$workdir"
+  rm -f "$canonical_artifact" "$rv64f_artifact" "$rv64fd_artifact"
+  echo "cleaned canonical build and ISA aliases: $canonical_artifact"
 fi
 
 mkdir -p "$BUILD_ROOT" "$OUT_DIR"
-
-if [[ "$ISA" != "$build_isa" && -f "$canonical_artifact" ]]; then
-  echo "Building $artifact"
-  echo "  artifact ISA tag=$ISA (reuses canonical artifact $canonical_artifact)"
-  cp -f "$canonical_artifact" "$artifact"
-  echo "  -> $artifact"
-  exit 0
-fi
 
 target="emu"
 case "$COV_MODE" in
@@ -245,5 +235,8 @@ fi
 
 bin_path="$workdir/$emu_name"
 [[ -f "$bin_path" ]] || die "expected emulator binary not found: $bin_path"
-cp -f "$bin_path" "$artifact"
+cp -f "$bin_path" "$canonical_artifact"
+if [[ "$artifact" != "$canonical_artifact" ]]; then
+  cp -f "$canonical_artifact" "$artifact"
+fi
 echo "  -> $artifact"
