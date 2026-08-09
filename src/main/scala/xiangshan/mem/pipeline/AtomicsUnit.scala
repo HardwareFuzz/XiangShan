@@ -366,11 +366,13 @@ class AtomicsUnit(val param: ExeUnitParams)(implicit p: Parameters) extends XSMo
   }
 
   def genAtomicLogMask(sizeEncode: UInt): UInt = {
-    require(sizeEncode.getWidth == LSUOpType.Size.width)
+    require(sizeEncode.getWidth == LSUOpType.AMOSize.width)
     LookupTree(sizeEncode, List(
-      LSUOpType.W.U -> "h000f".U(16.W),
-      LSUOpType.D.U -> "h00ff".U(16.W),
-      LSUOpType.Q.U -> "hffff".U(16.W)
+      LSUOpType.AMOSize.B.U -> "h0001".U(16.W),
+      LSUOpType.AMOSize.H.U -> "h0003".U(16.W),
+      LSUOpType.AMOSize.W.U -> "h000f".U(16.W),
+      LSUOpType.AMOSize.D.U -> "h00ff".U(16.W),
+      LSUOpType.AMOSize.Q.U -> "hffff".U(16.W)
     ))
   }
 
@@ -634,17 +636,17 @@ class AtomicsUnit(val param: ExeUnitParams)(implicit p: Parameters) extends XSMo
   pipe_req.amo_cmp  := genWdataAMO(rd, amoSize)
   pipe_req.miss_fail_cause_evict_btot := false.B
 
-  val atomicLogMask = genAtomicLogMask(LSUOpType.size(uop.fuOpType))
+  val atomicLogMask = genAtomicLogMask(amoSize)
   val atomicLogAlu = Module(new AMOALU(QuadWordBits))
   atomicLogAlu.io.mask := atomicLogMask
   atomicLogAlu.io.cmd := pipe_req.cmd
   atomicLogAlu.io.lhs := resp_data_wire
-  atomicLogAlu.io.rhs := genWdataAMO(rs2, LSUOpType.size(uop.fuOpType))
+  atomicLogAlu.io.rhs := genWdataAMO(rs2, amoSize)
 
   val atomicLogData = Wire(UInt(QuadWordBits.W))
   atomicLogData := atomicLogAlu.io.out
   when (pipe_req.cmd === M_XA_SWAP || isSc || isAMOCAS) {
-    atomicLogData := genWdataAMO(rs2, LSUOpType.size(uop.fuOpType))
+    atomicLogData := genWdataAMO(rs2, amoSize)
   }
 
   val atomicStoreSucceeded = dcache_resp_id === 1.U

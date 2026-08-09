@@ -9,12 +9,25 @@ import xiangshan.frontend.ftq.FtqPtr
 import xiangshan.backend.fu.FuType
 import xiangshan.JumpOpType
 
+class ResolvedTrapTrace(implicit val p: Parameters) extends Bundle with HasXSParameter {
+  val isInterrupt = Bool()
+  val isDebug = Bool()
+  val cause = UInt(CauseWidth.W)
+}
+
 class TraceCSR(implicit val p: Parameters) extends Bundle with HasXSParameter {
   val cause = UInt(CauseWidth.W)
   val tval  = UInt(TvalWidth.W)
   val mstatus = UInt(XLEN.W)
   val lastPriv    = Priv()
   val currentPriv = Priv()
+  // Architectural U/S/M privilege (0/1/3). Unlike currentPriv, this folds
+  // virtual privilege into U/S and reports M while the hart is in debug mode.
+  val archPriv = UInt(2.W)
+  // Resolved when the existing ROB-to-CSR exception pipeline presents the
+  // trap to NewCSR. The cause is selected from the actual trap-entry event,
+  // after delegation, VS remapping, hvictl injection and double-trap handling.
+  val resolvedTrap = Valid(new ResolvedTrapTrace)
 }
 
 class TracePipe(iretireWidth: Int)(implicit val p: Parameters) extends Bundle with HasXSParameter {

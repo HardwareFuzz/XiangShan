@@ -912,36 +912,70 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
   val traceCommitCount = PopCount(traceCommitValid)
   val traceTrapTerminal = io.flushOut.valid && deqHasException && !intrEnable
   val traceInterrupt = io.flushOut.valid && intrEnable
-  when(traceTrapTerminal || traceCommitCount.orR) {
-    traceTermSeq := traceTermSeq + traceCommitCount + traceTrapTerminal.asUInt
+  val traceTrapCandidate = traceTrapTerminal || traceInterrupt
+
+  // ROB detects the terminal edge at T0. rob.io.exception registers it once,
+  // then ExeUnit intentionally delays the CSR exception input by another two
+  // cycles, so NewCSR resolves the final architectural cause at T3. Keep the
+  // complete T0 record locally so the emitted interval still ends on the
+  // precise flush edge while the valid handshake remains cycle-exact.
+  private val TraceRobToNewCSRLatency = 3
+  val traceCandidatePipe = RegInit(VecInit(Seq.fill(TraceRobToNewCSRLatency)(false.B)))
+  traceCandidatePipe(0) := traceTrapCandidate
+  for (i <- 1 until TraceRobToNewCSRLatency) {
+    traceCandidatePipe(i) := traceCandidatePipe(i - 1)
+  }
+  val tracePendingValid = traceCandidatePipe.last
+  val traceMetadataBusy = traceCandidatePipe.asUInt.orR
+  when(traceTrapCandidate) {
+    assert(!traceMetadataBusy,
+      "CXTRACE trap candidate re-entered before the pending T0 metadata was consumed")
+  }
+  val tracePendingIsInterrupt = RegEnable(traceInterrupt, traceTrapCandidate)
+  val tracePendingCycle = RegEnable(exceptionClkEnd, traceTrapCandidate)
+  val tracePendingPc = RegEnable(debug_deqUop.debug_pc.getOrElse(0.U), traceTrapCandidate)
+  val tracePendingPriv = RegEnable(io.csr.traceArchPriv, traceTrapCandidate)
+  val tracePendingToken = RegEnable(exceptionTraceToken, traceTrapCandidate)
+  val tracePendingTermSeq = RegEnable(traceTermSeq + traceCommitCount, traceTrapCandidate)
+  val tracePendingCommitSlot = RegEnable(traceCommitCount, traceTrapCandidate)
+  val tracePendingInsn = RegEnable(exceptionInsnForTrace, traceTrapCandidate)
+  val tracePendingInsnLen = RegEnable(exceptionInsnLen, traceTrapCandidate)
+  val tracePendingStartCycle = RegEnable(exceptionClkStart, traceTrapCandidate)
+  val tracePendingSpan = RegEnable(exceptionClkSpan, traceTrapCandidate)
+  val tracePendingStartValid = RegEnable(exceptionStartValid, traceTrapCandidate)
+
+  val traceResolvedTrap = io.csr.traceResolvedTrap
+  val traceResolvedArchitectural =
+    tracePendingValid && traceResolvedTrap.valid && !traceResolvedTrap.bits.isDebug
+  val traceResolvedPreciseTrap = traceResolvedArchitectural && !tracePendingIsInterrupt
+
+  when(tracePendingValid) {
+    assert(traceResolvedTrap.valid,
+      "CXTRACE pending ROB trap is missing the resolved NewCSR event")
+  }
+  when(traceResolvedTrap.valid) {
+    assert(tracePendingValid,
+      "CXTRACE NewCSR resolved a trap without pending ROB metadata")
+  }
+  when(traceResolvedArchitectural) {
+    assert(traceResolvedTrap.bits.isInterrupt === tracePendingIsInterrupt,
+      "CXTRACE ROB/NewCSR trap type mismatch")
+  }
+
+  when(traceCommitCount.orR || traceResolvedPreciseTrap) {
+    traceTermSeq := traceTermSeq + traceCommitCount + traceResolvedPreciseTrap.asUInt
+  }
+  when(traceCommitCount.orR) {
     traceInstretSeq := traceInstretSeq + traceCommitCount
   }
-  when(traceTrapTerminal) {
+  when(traceResolvedArchitectural && tracePendingIsInterrupt) {
     printf(
-      "CXTRACE v=2 event=inst_terminal core=xiangshan hart=%d token=%d term_seq=%d instret_seq=- commit_slot=%d pc=0x%x insn=0x%x insn_len=%d start_cycle=%d end_cycle=%d span=%d start_valid=%d start_kind=backend_alloc end_kind=precise_trap retired=0 trap=1 cause=0x%x priv=%d\n",
+      "CXTRACE v=2 event=interrupt core=xiangshan hart=%0d cycle=%0d pc=0x%x cause=0x%x priv=%0d\n",
       io.hartId,
-      exceptionTraceToken,
-      traceTermSeq + traceCommitCount,
-      traceCommitCount,
-      debug_deqUop.debug_pc.getOrElse(0.U),
-      exceptionInsnForTrace,
-      exceptionInsnLen,
-      exceptionClkStart,
-      exceptionClkEnd,
-      exceptionClkSpan,
-      exceptionStartValid,
-      io.csr.traceCause,
-      io.csr.tracePriv
-    )
-  }
-  when(traceInterrupt) {
-    printf(
-      "CXTRACE v=2 event=interrupt core=xiangshan hart=%d cycle=%d pc=0x%x cause=0x%x priv=%d\n",
-      io.hartId,
-      exceptionClkEnd,
-      debug_deqUop.debug_pc.getOrElse(0.U),
-      io.csr.traceCause,
-      io.csr.tracePriv
+      tracePendingCycle,
+      tracePendingPc,
+      traceResolvedTrap.bits.cause,
+      tracePendingPriv
     )
   }
 
@@ -1063,7 +1097,7 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
     )
     when(traceCommitValid(i)) {
       printf(
-        "CXTRACE v=2 event=inst_terminal core=xiangshan hart=%d token=%d term_seq=%d instret_seq=%d commit_slot=%d pc=0x%x insn=0x%x insn_len=%d start_cycle=%d end_cycle=%d span=%d start_valid=%d start_kind=backend_alloc end_kind=arch_commit retired=1 trap=0 cause=none priv=%d issue_cycle_raw=%d run_cycle_raw=%d writeback_cycle_raw=%d\n",
+        "CXTRACE v=2 event=inst_terminal core=xiangshan hart=%0d token=%0d term_seq=%0d instret_seq=%0d commit_slot=%0d pc=0x%x insn=0x%x insn_len=%0d start_cycle=%0d end_cycle=%0d span=%0d start_valid=%0d start_kind=backend_alloc end_kind=arch_commit retired=1 trap=0 cause=none priv=%0d issue_cycle_raw=%0d run_cycle_raw=%0d writeback_cycle_raw=%0d\n",
         io.hartId,
         commitTraceToken,
         commitTermSeq,
@@ -1076,7 +1110,7 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
         commitClkEnd,
         commitClkSpan,
         commitStartValid,
-        io.csr.tracePriv,
+        io.csr.traceArchPriv,
         commitPerfDebugInfo.issueTime,
         commitPerfDebugInfo.logRunStartTime,
         commitPerfDebugInfo.writebackTime
@@ -1101,6 +1135,29 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
       io.commits.info(i).rfWen,
       io.commits.info(i).debug_ldest.getOrElse(0.U),
       debug_exuData(walkPtrVec(i).value)
+    )
+  }
+
+  // Keep every terminal record in architectural age order. A precise trap is
+  // younger than any normal commits accepted on the same edge, so emit it
+  // after the commit loop. This also keeps term_seq and commit_slot ordered
+  // if a future ROB implementation permits commit+trap in one cycle.
+  when(traceResolvedPreciseTrap) {
+    printf(
+      "CXTRACE v=2 event=inst_terminal core=xiangshan hart=%0d token=%0d term_seq=%0d instret_seq=- commit_slot=%0d pc=0x%x insn=0x%x insn_len=%0d start_cycle=%0d end_cycle=%0d span=%0d start_valid=%0d start_kind=backend_alloc end_kind=precise_trap retired=0 trap=1 cause=0x%x priv=%0d\n",
+      io.hartId,
+      tracePendingToken,
+      tracePendingTermSeq,
+      tracePendingCommitSlot,
+      tracePendingPc,
+      tracePendingInsn,
+      tracePendingInsnLen,
+      tracePendingStartCycle,
+      tracePendingCycle,
+      tracePendingSpan,
+      tracePendingStartValid,
+      traceResolvedTrap.bits.cause,
+      tracePendingPriv
     )
   }
 

@@ -265,8 +265,8 @@ class BackendInlinedImp(override val wrapper: BackendInlined)(implicit p: Parame
   ctrlBlock.io.robio.csr.trapTarget := intRegion.io.csrio.get.trapTarget
   ctrlBlock.io.robio.csr.wfiEvent := intRegion.io.csrio.get.wfi_event
   ctrlBlock.io.robio.csr.criticalErrorState := intRegion.io.csrio.get.criticalErrorState
-  ctrlBlock.io.robio.csr.tracePriv := intRegion.io.csrio.get.traceCSR.currentPriv
-  ctrlBlock.io.robio.csr.traceCause := intRegion.io.csrio.get.traceCSR.cause
+  ctrlBlock.io.robio.csr.traceArchPriv := intRegion.io.csrio.get.traceCSR.archPriv
+  ctrlBlock.io.robio.csr.traceResolvedTrap := intRegion.io.csrio.get.traceCSR.resolvedTrap
   ctrlBlock.io.robio.lsq <> io.mem.robLsqIO
   ctrlBlock.io.robio.lsTopdownInfo <> io.mem.lsTopdownInfo
   ctrlBlock.io.robio.debug_ls <> io.mem.debugLS
