@@ -1320,8 +1320,29 @@ class NewCSR(implicit val p: Parameters) extends Module
   val currentPriv = privForTrace
   val lastPriv = RegEnable(privForTrace, Priv.M, (xret || io.fromRob.trap.valid))
 
+  val resolvedCauseEvents = Seq(
+    trapEntryMNEvent.out.mncause,
+    trapEntryMEvent.out.mcause,
+    trapEntryHSEvent.out.scause,
+    trapEntryVSEvent.out.vscause,
+  )
+  val resolvedArchTrapValid = VecInit(resolvedCauseEvents.map(_.valid)).asUInt.orR
+  val resolvedArchTrapCause =
+    Mux1H(resolvedCauseEvents.map(e => e.valid -> e.bits.ExceptionCode.asUInt))
+
   io.status.traceCSR.lastPriv       := lastPriv
   io.status.traceCSR.currentPriv    := privForTrace
+  io.status.traceCSR.archPriv       := PRVM.asUInt
+  // Handshake exactly the ROB trap that reaches NewCSR at T3. A standalone critical-
+  // error debug entry has no ROB metadata, while a trap already in debug mode
+  // still needs to acknowledge the ROB pending slot.
+  io.status.traceCSR.resolvedTrap.valid := hasTrap
+  // Keep the ROB-origin kind separate from the final xcause Interrupt bit:
+  // Smdbltrp can turn an incoming interrupt/NMI into synchronous EX_DT while
+  // it remains an interrupt event with no instruction token.
+  io.status.traceCSR.resolvedTrap.bits.isInterrupt := hasTrap && trapIsInterrupt
+  io.status.traceCSR.resolvedTrap.bits.isDebug := hasTrap && !resolvedArchTrapValid
+  io.status.traceCSR.resolvedTrap.bits.cause := Mux(resolvedArchTrapValid, resolvedArchTrapCause, 0.U)
   io.status.traceCSR.cause := Mux1H(
     Seq(privState.isModeM, privState.isModeHS, privState.isModeVS),
     Seq(mcause.rdata,      scause.rdata,       vscause.rdata)
