@@ -315,12 +315,6 @@ trait HaveAXI4MemPort {
       TLXbar() :=*
       bankedNode.get
 
-    if (soc.L3CacheParamsOpt.isEmpty) {
-      mem_xbar :=
-        TLBuffer.chainNode(2, Some("NoL3_debug_dma_to_mem_buffer")) :=
-        l3_xbar.get
-    }
-
     mem_xbar :=
       TLWidthWidget(8) :=
       TLBuffer.chainNode(3, name = Some("PeripheralXbar_to_MemXbar_buffer")) :=
@@ -455,9 +449,7 @@ class MemMisc()(implicit p: Parameters) extends BaseSoC
 
   if (l3_banked_xbar.isDefined) {
     l3_in :*= TLEdgeBuffer(_ => true, Some("L3_in_buffer")) :*= l3_banked_xbar.get
-    if (soc.L3CacheParamsOpt.isDefined) {
-      l3_banked_xbar.get := TLBuffer.chainNode(2) := l3_xbar.get
-    }
+    l3_banked_xbar.get := TLBuffer.chainNode(2) := l3_xbar.get
   }
   bankedNode match {
     case Some(bankBinder) =>
